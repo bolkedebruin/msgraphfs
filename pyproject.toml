@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "sharepointfs"
+name = "msgraphfs"
 authors = [{name = "Laurent Mignon", email = "laurent.mignon@acsone.eu"}]
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -23,6 +23,8 @@ requires-python = ">=3.11"
 [project.optional-dependencies]
 test = [
     "pytest",
+    "pytest-cov",
+    "pytest-asyncio",
     "coverage[toml]",
 ]
 mypy = [
@@ -34,17 +36,17 @@ release = [
 ]
 
 [project.entry-points."fsspec.specs"]
-sharepointfs="sharepointfs.SharepointFS"
+shpt="msgraphfs.SharepointFS"
 
 [project.urls]
-Source = "https://github.com/acsone/sharepointfs"
+Source = "https://github.com/acsone/msgraphfs"
 
 [tool.hatch.version]
-path="src/sharepointfs/version.py"
+path="src/msgraphfs/version.py"
 
 
 [tool.hatch.build]
-include = ["src/sharepointfs"]
+include = ["src/msgraphfs"]
 directory = "dist"
 
 [tool.hatch.build.targets.wheel]
@@ -56,7 +58,7 @@ multi_line_output = 3
 
 [tool.coverage.run]
 branch = true
-source_pkgs = ["sharepointfs"]
+source_pkgs = ["msgraphfs"]
 
 [tool.coverage.paths]
 source = ["src", ".tox/*/site-packages"]
@@ -91,7 +93,7 @@ implicit_reexport = true
 
 [tool.towncrier]
 name = "Sharepoint fsspec adapter"
-package = "sharepointfs"
+package = "msgraphfs"
 package_dir = "src"
 filename = "HISTORY.md"
 directory = "news"

@@ -3,6 +3,7 @@ import datetime
 import mimetypes
 import httpx
 import logging
+import weakref
 from fsspec.asyn import (
     AsyncFileSystem,
     FSTimeoutError,
@@ -15,7 +16,7 @@ from fsspec.asyn import (
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
 
-from httpx import HTTPError, Response
+from httpx import HTTPStatusError, Response
 from httpx._types import URLTypes
 
 HTTPX_RETRYABLE_ERRORS = (
@@ -37,9 +38,13 @@ def wrap_http_not_found_exceptions(func):
     async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
-        except HTTPError as e:
+        except HTTPStatusError as e:
             if e.response.status_code == 404:
-                raise FileNotFoundError(f"File not found: {e}") from e
+                path = e.request.url.path
+                if "root:" in path:
+                    path = path.split("root:")[-1]
+                    path = path[:-1] if path[-1] == ":" else path
+                raise FileNotFoundError(f"File not found: {path}") from e
             raise e
 
     return wrapper
@@ -50,7 +55,7 @@ async def _http_call_with_retry(func, *, args=(), kwargs=None, retries) -> Respo
     kwargs = kwargs or {}
     for i in range(retries):
         try:
-            response = func(*args, **kwargs)
+            response = await func(*args, **kwargs)
             response.raise_for_status()
             return response
         except HTTPX_RETRYABLE_ERRORS as e:
@@ -59,39 +64,35 @@ async def _http_call_with_retry(func, *, args=(), kwargs=None, retries) -> Respo
             _logger.debug("Retryable error: %s", e)
             await asyncio.sleep(min(1.7**i * 0.1, 15))
             continue
-        except HTTPError as e:
+        except HTTPStatusError as e:
             if e.response.status_code in HTTPX_RETRYABLE_HTTP_STATUS_CODES:
                 if i == retries - 1:
                     raise e
                 _logger.debug("Retryable HTTP status code: %s", e.response.status_code)
                 await asyncio.sleep(min(1.7**i * 0.1, 15))
                 continue
+            if e.response.status_code != 404:
+                _logger.error("HTTP error: %s", response.content)
             raise e
 
 
-class SharepointFS(AsyncFileSystem):
-    """A filesystem that represents a SharePoint site dirve as a filesystem.
+class AbstractMSGraphFS(AsyncFileSystem):
+    """A filesystem that represents microsoft files exposed through the microsoft graph
+    API.
 
     parameters:
-    site_id (str): The ID of the SharePoint site.
-    drive_id (str): The ID of the SharePoint drive.
     oauth2_client_params (dict): Parameters for the OAuth2 client to use for
         authentication. see https://docs.authlib.org/en/latest/client/api.html#authlib.integrations.httpx_client.AsyncOAuth2Client
     """
 
-    protocol = "sharepoint"
     retries = 5
     blocksize = 10 * 1024 * 1024  # 10 MB
 
     def __init__(
         self,
-        site_id: str,
-        drive_id: str,
         oauth2_client_params: dict,
         **kwargs,
     ):
-        self.site_id: str = site_id
-        self.drive_id: str = drive_id
         super_kwargs = {
             k: kwargs.pop(k)
             for k in ["use_listings_cache", "listings_expiry_time", "max_paths"]
@@ -103,11 +104,8 @@ class SharepointFS(AsyncFileSystem):
             **oauth2_client_params,
             follow_redirects=True,
         )
-        self.drive_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}"
         if not self.asynchronous:
-            #  TO BE FIXED
-            # weakref.finalize(self, self.close_http_session, self.client, self.loop)
-            pass
+            weakref.finalize(self, self.close_http_session, self.client, self.loop)
 
     @staticmethod
     def close_http_session(
@@ -127,38 +125,50 @@ class SharepointFS(AsyncFileSystem):
             except FSTimeoutError:
                 pass
 
-    def _get_path(self, shpt_info: dict) -> str:
-        parent_path = shpt_info["parentReference"].get("path")
+    def _path_to_url(self, path, item_id=None, action=None) -> str:
+        """This method must be implemented by subclasses to convert a path to a valid
+        URL to call the Microsoft Graph API for the given path according to the target
+        service.
+
+        (OneDrive, SharePoint, etc.)
+        """
+        raise NotImplementedError
+
+    def _get_path(self, drive_item_info: dict) -> str:
+        parent_path = drive_item_info["parentReference"].get("path")
         if not parent_path:
             return "/"
         # remove all the part before the "root:"
         parent_path = parent_path.split("root:")[1]
-        return parent_path + "/" + shpt_info["name"]
+        if parent_path and not parent_path.startswith("/"):
+            parent_path = "/" + parent_path
+        return parent_path + "/" + drive_item_info["name"]
 
-    def _path_to_url(self, path, item_id=None, action=None):
-        action = action and f"/{action}" if action else ""
-        path = self._strip_protocol(path).rstrip("/")
-        if path:
-            path = f":{path}:"
-        if item_id:
-            return f"{self.drive_url}/items/{item_id}{action}"
+    def _drive_item_info_to_fsspec_info(self, drive_item_info: dict) -> dict:
+        """Convert a drive item info to a fsspec info dictionary.
 
-        return f"{self.drive_url}/root{path}{action}"
-
-    def _shpt_info_to_fsspec_info(self, shpt_info: dict) -> dict:
+        see
+        https://docs.microsoft.com/en-us/graph/api/resources/driveitem?view=graph-rest-1.0
+        """
         _type = "other"
-        if shpt_info.get("folder"):
+        if drive_item_info.get("folder"):
             _type = "directory"
-        elif shpt_info.get("file"):
+        elif drive_item_info.get("file"):
             _type = "file"
         data = {
-            "name": self._get_path(shpt_info),
-            "size": shpt_info.get("size", 0),
+            "name": self._get_path(drive_item_info),
+            "size": drive_item_info.get("size", 0),
             "type": _type,
-            "sharepoint_info": shpt_info,
+            "sharepoint_info": drive_item_info,
+            "time": datetime.datetime.fromisoformat(
+                drive_item_info.get("createdDateTime", "1970-01-01T00:00:00Z")
+            ),
+            "mtime": datetime.datetime.fromisoformat(
+                drive_item_info.get("lastModifiedDateTime", "1970-01-01T00:00:00Z")
+            ),
         }
         if _type == "file":
-            data["mimetype"] = shpt_info.get("file", {}).get("mimeType", "")
+            data["mimetype"] = drive_item_info.get("file", {}).get("mimeType", "")
         return data
 
     async def _get_item_id(self, path: str, throw_on_missing=False) -> str | None:
@@ -172,7 +182,7 @@ class SharepointFS(AsyncFileSystem):
         """
         url = self._path_to_url(path)
         try:
-            response = await self._ms_graph_get(url, params={"select": "id"})
+            response = await self._msgraph_get(url, params={"select": "id"})
             return response.json()["id"]
         except FileNotFoundError:
             if throw_on_missing:
@@ -181,6 +191,23 @@ class SharepointFS(AsyncFileSystem):
 
     get_item_id = sync_wrapper(_get_item_id)
 
+    async def _get_item_reference(self, path: str, item_id: str | None = None) -> dict:
+        """Return a dictionary with information about the item reference of the given
+        path.
+
+        This method is useful when you need to get an itemReference to
+        use as an argument in other methods. see
+        https://docs.microsoft.com/en-us/graph/api/resources/itemreference?view=graph-rest-1.0
+        """
+        url = self._path_to_url(path, item_id=item_id)
+        response = await self._msgraph_get(
+            url,
+            params={
+                "select": "id,driveId,driveType,name,path,shareId,sharepointIds,siteId"
+            },
+        )
+        return response.json()
+
     @staticmethod
     def _guess_type(path: str) -> str:
         return mimetypes.guess_type(path)[0] or "application/octet-stream"
@@ -188,7 +215,7 @@ class SharepointFS(AsyncFileSystem):
     ################################################
     # Helper methods to call the Microsoft Graph API
     ################################################
-    async def _call_ms_graph(
+    async def _call_msgraph(
         self, http_method: str, url: URLTypes, *args, **kwargs
     ) -> Response:
         """Call the Microsoft Graph API."""
@@ -199,46 +226,46 @@ class SharepointFS(AsyncFileSystem):
             retries=self.retries,
         )
 
-    call_ms_graph = sync_wrapper(_call_ms_graph)
+    call_msgraph = sync_wrapper(_call_msgraph)
 
-    async def _ms_graph_get(self, url: URLTypes, *args, **kwargs) -> Response:
+    async def _msgraph_get(self, url: URLTypes, *args, **kwargs) -> Response:
         """Send a GET request to the Microsoft Graph API."""
-        return await self._call_ms_graph("GET", url, *args, **kwargs)
+        return await self._call_msgraph("GET", url, *args, **kwargs)
 
-    ms_graph_get = sync_wrapper(_ms_graph_get)
+    msgraph_get = sync_wrapper(_msgraph_get)
 
-    async def _ms_graph_post(self, url: URLTypes, *args, **kwargs) -> Response:
+    async def _msgraph_post(self, url: URLTypes, *args, **kwargs) -> Response:
         """Send a POST request to the Microsoft Graph API."""
-        return await self._call_ms_graph("POST", url, *args, **kwargs)
+        return await self._call_msgraph("POST", url, *args, **kwargs)
 
-    ms_graph_post = sync_wrapper(_ms_graph_post)
+    msgraph_post = sync_wrapper(_msgraph_post)
 
-    async def _ms_graph_put(self, url: URLTypes, *args, **kwargs) -> Response:
+    async def _msgraph_put(self, url: URLTypes, *args, **kwargs) -> Response:
         """Send a PUT request to the Microsoft Graph API."""
-        return await self._call_ms_graph("PUT", url, *args, **kwargs)
+        return await self._call_msgraph("PUT", url, *args, **kwargs)
 
-    ms_graph_put = sync_wrapper(_ms_graph_put)
+    msgraph_put = sync_wrapper(_msgraph_put)
 
-    async def _ms_graph_delete(self, url: URLTypes, *args, **kwargs) -> Response:
+    async def _msgraph_delete(self, url: URLTypes, *args, **kwargs) -> Response:
         """Send a DELETE request to the Microsoft Graph API."""
-        return await self._call_ms_graph("DELETE", url, *args, **kwargs)
+        return await self._call_msgraph("DELETE", url, *args, **kwargs)
 
-    ms_graph_delete = sync_wrapper(_ms_graph_delete)
+    msgraph_delete = sync_wrapper(_msgraph_delete)
 
     async def _msg_graph_patch(self, url: URLTypes, *args, **kwargs) -> Response:
         """Send a PATCH request to the Microsoft Graph API."""
-        return await self._call_ms_graph("PATCH", url, *args, **kwargs)
+        return await self._call_msgraph("PATCH", url, *args, **kwargs)
 
-    ms_graph_patch = sync_wrapper(_msg_graph_patch)
+    msgraph_patch = sync_wrapper(_msg_graph_patch)
 
     #############################################################
-    # Implement required async methods
+    # Implement required async methods for the fsspec interface
     #############################################################
 
-    async def _exists(self, path, **kwargs):
+    async def _exists(self, path: str, **kwargs) -> bool:
         return await self._get_item_id(path) is not None
 
-    async def _info(self, path, item_id=None, **kwargs):
+    async def _info(self, path: str, item_id: str | None = None, **kwargs) -> dict:
         """Get information about a file or directory.
 
         Parameters
@@ -250,10 +277,12 @@ class SharepointFS(AsyncFileSystem):
             information about the given path.
         """
         url = self._path_to_url(path, item_id=item_id)
-        response = await self._ms_graph_get(url)
-        return self._shpt_info_to_fsspec_info(response.json())
+        response = await self._msgraph_get(url)
+        return self._drive_item_info_to_fsspec_info(response.json())
 
-    async def _ls(self, path, detail=True, item_id=None, **kwargs) -> list[dict | str]:
+    async def _ls(
+        self, path: str, detail: bool = True, item_id: str | None = None, **kwargs
+    ) -> list[dict | str]:
         """List files in the given path.
 
         Parameters
@@ -271,32 +300,50 @@ class SharepointFS(AsyncFileSystem):
             information
         """
         url = self._path_to_url(path, item_id=item_id, action="children")
-        response = await self._ms_graph_get(url)
+        params = None
+        if not detail:
+            params = {"select": "name,parentReference"}
+        response = await self._msgraph_get(url, params=params)
         items = response.json().get("value", [])
+        if not items:
+            # maybe the path is a file
+            try:
+                item = await self._info(path)
+                if item["type"] == "file":
+                    items = [item["sharepoint_info"]]
+            except FileNotFoundError:
+                pass
         if detail:
-            return [self._shpt_info_to_fsspec_info(item) for item in items]
+            return [self._drive_item_info_to_fsspec_info(item) for item in items]
         else:
             return [self._get_path(item) for item in items]
 
-    async def _cat_file(self, path, start=None, end=None, item_id=None, **kwargs):
+    async def _cat_file(
+        self,
+        path: str,
+        start: int = None,
+        end: int = None,
+        item_id: str | None = None,
+        **kwargs,
+    ):
         url = self._path_to_url(path, item_id=item_id, action="content")
         headers = kwargs.get("headers", {})
         if start is not None and end is not None:
             headers["Range"] = f"bytes={start}-{end - 1}"
-        response = await self._ms_graph_get(url, headers=headers)
+        response = await self._msgraph_get(url, headers=headers)
         return response.content
 
-    async def _pipe_file(self, path, value, **kwargs):
+    async def _pipe_file(self, path: str, value: bytes, **kwargs):
         with self.open(path, "wb") as f:
             await f.write(value)
 
-    async def _get_file(self, rpath, lpath, **kwargs):
+    async def _get_file(self, rpath: str, lpath: str, **kwargs):
         headers = kwargs.get("headers", {})
         content = await self._cat_file(rpath, **kwargs, headers=headers)
         with open(lpath, "wb") as f:
             f.write(content)
 
-    async def _put_file(self, lpath, rpath, **kwargs):
+    async def _put_file(self, lpath: str, rpath: str, **kwargs):
         with open(lpath, "rb") as f:
             data = f.read()
         await self._pipe_file(rpath, data, **kwargs)
@@ -304,34 +351,90 @@ class SharepointFS(AsyncFileSystem):
             self.invalidate_cache(rpath)
             rpath = self._parent(rpath)
 
-    async def _rm_file(self, path, item_id=None, **kwargs):
+    async def _rm_file(self, path: str, item_id: str | None = None, **kwargs):
+        if not await self._isfile(path):
+            raise FileNotFoundError(f"File not found: {path}")
         item_id = item_id or await self._get_item_id(path, throw_on_missing=True)
         url = self._path_to_url(path, item_id=item_id)
-        await self._ms_graph_delete(url)
+        await self._msgraph_delete(url)
         self.invalidate_cache(path)
 
-    async def cp_file(self, path1, path2, **kwargs):
+    async def cp_file(self, path1: str, path2: str, **kwargs):
         source_item_id = await self._get_item_id(path1, throw_on_missing=True)
         url = self._path_to_url(path1, item_id=source_item_id, action="copy")
         path2 = self._strip_protocol(path2)
         parent_path, _file_name = path2.rsplit("/", 1)
-        parent_id = await self._get_item_id(parent_path)
+        item_reference = await self._get_item_reference(parent_path)
         json = {
-            "parentReference": {"id": parent_id, "driveId": self.drive_id},
+            "parentReference": item_reference,
             "name": _file_name,
         }
-        await self._ms_graph_post(url, json=json)
+        await self._msgraph_post(url, json=json)
 
-    # "_expand_path", keep generic implementation
-    # "_blob", keep generic implementation
-    # "_isfile",
-    # "_isdir",
-    # "_walk",
-    # "_find",
-    # "_du",
-    # "_size",
-    # "_mkdir",
-    # "_makedirs",
+    async def _isfile(self, path: str) -> bool:
+        url = self._path_to_url(path)
+        response = await self._msgraph_get(url, params={"select": "file"})
+        return response.json().get("file") is not None
+
+    async def _isdir(self, path: str) -> bool:
+        url = self._path_to_url(path)
+        response = await self._msgraph_get(url, params={"select": "folder"})
+        return response.json().get("folder") is not None
+
+    async def _size(self, path: str) -> int:
+        url = self._path_to_url(path)
+        response = await self._msgraph_get(url, params={"select": "size"})
+        return response.json().get("size", 0)
+
+    async def _mkdir(self, path, create_parents=True, exist_ok=False, **kwargs) -> str:
+        path = self._strip_protocol(path).rstrip("/")
+        parent, child = path.rsplit("/", 1)
+        parent_id = await self._get_item_id(parent)
+        if not parent_id and not create_parents:
+            raise FileNotFoundError(f"Parent directory does not exist: {parent}")
+        if not parent_id:
+            await self._mkdir(parent, create_parents=create_parents)
+            parent_id = await self._get_item_id(parent)
+        url = self._path_to_url(path, item_id=parent_id, action="children")
+        response = await self._msgraph_post(
+            url,
+            json={
+                "name": child,
+                "folder": {},
+                "@microsoft.graph.conflictBehavior": "fail",
+            },
+        )
+        return response.json()["id"]
+
+    async def _makedirs(self, path: str, exist_ok: bool = False):
+        try:
+            await self._mkdir(path, create_parents=True)
+        except HTTPStatusError as e:
+            if e.response.status_code == 409:
+                if not exist_ok:
+                    raise FileExistsError(f"Directory already exists: {path}") from e
+            else:
+                raise e
+
+    async def _rmdir(self, path: str):
+        if not await self._isdir(path):
+            raise FileNotFoundError(f"Directory not found: {path}")
+        if not await self._ls(path):
+            raise OSError(f"Directory not empty: {path}")
+        item_id = await self._get_item_id(path, throw_on_missing=True)
+        url = self._path_to_url(path, item_id=item_id)
+        await self._msgraph_delete(url)
+        self.invalidate_cache(path)
+
+    rmdir = sync_wrapper(_rmdir)  # not into the list of async methods to auto wrap
+
+    async def _rm(self, path, recursive=False, batch_size=None, **kwargs):
+        if not recursive and await self._isdir(path) and await self._ls(path):
+            raise OSError(f"Directory not empty: {path}")
+        item_id = await self._get_item_id(path, throw_on_missing=True)
+        url = self._path_to_url(path, item_id=item_id)
+        await self._msgraph_delete(url)
+        self.invalidate_cache(path)
 
     def _open(
         self,
@@ -390,32 +493,70 @@ class SharepointFS(AsyncFileSystem):
         # if the file exists, update the last modified date time
         # otherwise, create an empty file"""
         item_id = item_id or await self._get_item_id(path)
-        if item_id:
-            url = self._path_to_url(path, item_id=item_id)
+        if item_id and not truncate:
             if truncate:
-                await self._ms_graph_put(
-                    url, data=b"", headers={"Content-Type": "application/octet-stream"}
+                url = self._path_to_url(path, item_id=item_id, action="content")
+                await self._msgraph_put(
+                    url,
+                    content=b"",
+                    headers={"Content-Type": "application/octet-stream"},
                 )
             else:
-                await self._ms_graph_patch(
+                url = self._path_to_url(path, item_id=item_id)
+                await self._msgraph_patch(
                     url, json={"lastModifiedDateTime": datetime.now().isoformat()}
                 )
         else:
             parent_path, file_name = path.rsplit("/", 1)
-            parent_id = await self._get_item_id(parent_path)
+            parent_id = await self._get_item_id(parent_path, throw_on_missing=True)
             item_id = f"{parent_id}:/{file_name}:"
-            url = self._path_to_url(path, item_id=item_id)
+            url = self._path_to_url(path, item_id=item_id, action="content")
             headers = {"Content-Type": self._guess_type(path)}
-            await self._ms_graph_put(url, data=b"", headers=headers)
+            await self._msgraph_put(url, content=b"", headers=headers)
         self.invalidate_cache(path)
 
     touch = sync_wrapper(_touch)
 
 
+class SharepointFS(AbstractMSGraphFS):
+    """A filesystem that represents a SharePoint site dirve as a filesystem.
+
+    parameters:
+    site_id (str): The ID of the SharePoint site.
+    drive_id (str): The ID of the SharePoint drive.
+    oauth2_client_params (dict): Parameters for the OAuth2 client to use for
+        authentication. see https://docs.authlib.org/en/latest/client/api.html#authlib.integrations.httpx_client.AsyncOAuth2Client
+    """
+
+    protocol = ["shpt"]
+
+    def __init__(
+        self,
+        site_id: str,
+        drive_id: str,
+        oauth2_client_params: dict,
+        **kwargs,
+    ):
+        super().__init__(oauth2_client_params=oauth2_client_params, **kwargs)
+        self.site_id: str = site_id
+        self.drive_id: str = drive_id
+        self.drive_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}"
+
+    def _path_to_url(self, path, item_id=None, action=None) -> str:
+        action = action and f"/{action}" if action else ""
+        path = self._strip_protocol(path).rstrip("/")
+        if path:
+            path = f":{path}:"
+        if item_id:
+            return f"{self.drive_url}/items/{item_id}{action}"
+
+        return f"{self.drive_url}/root{path}{action}"
+
+
 class AsyncStreamedFileMixin:
     """Mixin for streamed file-like objects using async iterators."""
 
-    def __init__mixin(self, **kwargs):
+    def _init__mixin(self, **kwargs):
         self.path = self.fs._strip_protocol(self.path)
         block_size = kwargs.get("block_size", "default")
         if block_size == "default":
@@ -423,9 +564,8 @@ class AsyncStreamedFileMixin:
         self.blocksize = block_size if block_size is not None else self.fs.blocksize
         if "w" in self.mode or "b" in self.mode:
             # block_size must bet a multiple of 320 KiB
-            if block_size % (320 * 1024) != 0:
+            if self.blocksize % (320 * 1024) != 0:
                 raise ValueError("block_size must be a multiple of 320 KiB")
-            raise NotImplementedError("Write mode is not supported.")
         self._append_mode = "a" in self.mode and self.item_id is not None
         self._reset_session_info()
 
@@ -436,9 +576,9 @@ class AsyncStreamedFileMixin:
         Returns:
             str: The item ID of the file if it exists, otherwise None.
         """
-        if not hasattr(self, "_item_id"):
-            self._item_id = self.fs.get_item_id(self.path)
-        return self._item_id
+        if not hasattr(self, "__item_id"):
+            self.__item_id = self.fs.get_item_id(self.path)
+        return self.__item_id
 
     async def _create_upload_session(self) -> tuple[str, datetime.datetime]:
         """Create a new upload session for the file.
@@ -456,7 +596,7 @@ class AsyncStreamedFileMixin:
         url = self.fs._path_to_url(
             self.path, item_id=item_id, action="createUploadSession"
         )
-        response = await self.fs._ms_graph_post(
+        response = await self.fs._msgraph_post(
             url,
             json={
                 "@microsoft.graph.conflictBehavior": "replace",
@@ -481,25 +621,24 @@ class AsyncStreamedFileMixin:
         self._upload_expiration_dt = None
         self._chunk_start_pos = 0
         self._remaining_bytes = None
-        self.buffer = None
 
     async def _upload_content_at_once(self, data):
         headers = self.kwargs.get("headers", {})
         if "content-type" not in headers:
             headers["content-type"] = self.fs._guess_type(self.path)
-        item_id = await self._get_item_id(self.path)
+        item_id = await self.fs._get_item_id(self.path)
         if not item_id:
             parent_path, file_name = self.path.rsplit("/", 1)
-            parent_id = await self._get_item_id(parent_path)
+            parent_id = await self.fs._get_item_id(parent_path, throw_on_missing=True)
             item_id = f"{parent_id}:/{file_name}:"
-        url = self._path_to_url(self.path, item_id=item_id, action="content")
-        await self._ms_graph_put(url, data=data, headers=headers)
+        url = self.fs._path_to_url(self.path, item_id=item_id, action="content")
+        await self.fs._msgraph_put(url, content=data, headers=headers)
         self.fs.invalidate_cache(self.path)
 
     async def _abort_upload_session(self):
         """Abort the current upload session."""
         if self._upload_session_url and not self._is_upload_session_expired:
-            await self.fs._ms_graph_delete(self._upload_session_url)
+            await self.fs._msgraph_delete(self._upload_session_url)
         self._reset_session_info()
 
     async def _commit_upload_session(self):
@@ -507,7 +646,7 @@ class AsyncStreamedFileMixin:
         if self._upload_session_url and self._is_upload_session_expired:
             raise RuntimeError("The upload session has expired.")
         if self._upload_session_url:
-            await self.fs._ms_graph_post(self._upload_session_url)
+            await self.fs._msgraph_post(self._upload_session_url)
         self._reset_session_info()
 
     async def _commit(self):
@@ -582,9 +721,9 @@ class AsyncStreamedFileMixin:
                 "Content-Length": str(chunk_size),
                 "Content-Range": f"bytes {self._chunk_start_pos}-{self._chunk_start_pos + chunk_size - 1}/*",
             }
-            response = await self.fs._ms_graph_put(
+            response = await self.fs._msgraph_put(
                 self._upload_session_url,
-                data=chunk_to_write,
+                content=chunk_to_write,
                 headers=headers,
             )
             self._upload_expiration_dt = datetime.datetime.fromisoformat(
@@ -595,10 +734,9 @@ class AsyncStreamedFileMixin:
 
         if self.autocommit and final:
             await self._commit()
-            return True
         return not final
 
-    async def _aync_initiate_upload(self):
+    async def _initiate_upload(self):
         if self.autocommit and self.tell() < self.blocksize:
             # only happens when closing small file, use on-shot PUT
             return
@@ -609,11 +747,15 @@ class AsyncStreamedFileMixin:
             await self._create_upload_session()
         )
 
-    async def fetch_range(self, start, end) -> bytes:
+    async def _fetch_range(self, start, end) -> bytes:
         """Get the specified set of bytes from remote."""
         return await self.fs._cat_file(
             self.path, start=start, end=end, item_id=self._item_id
         )
+
+    @property
+    def loop(self):
+        return self.fs.loop
 
 
 class SharepointBuffredFile(AsyncStreamedFileMixin, AbstractBufferedFile):
@@ -683,7 +825,7 @@ class SharepointBuffredFile(AsyncStreamedFileMixin, AbstractBufferedFile):
             }
         )
 
-        AsyncStreamedFileMixin.__init__mixin(self, **kwargs_mixin)
+        AsyncStreamedFileMixin._init__mixin(self, **kwargs_mixin)
 
     ########################################################
     ## AbstractBufferedFile methods to implement or override
@@ -760,4 +902,4 @@ class SharepointStreamedFile(AsyncStreamedFileMixin, AbstractAsyncStreamedFile):
             }
         )
 
-        AsyncStreamedFileMixin.__init__mixin(self, **kwargs_mixin)
+        AsyncStreamedFileMixin._init__mixin(self, **kwargs_mixin)
