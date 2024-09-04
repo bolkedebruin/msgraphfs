@@ -1,9 +1,13 @@
+import time
 import uuid
+import fsspec
 from fsspec.implementations.dirfs import DirFileSystem
 import pytest
+import pytest_asyncio
 import os
 from msgraphfs import SharepointFS
-from contextlib import contextmanager
+from functools import partial
+from contextlib import contextmanager, asynccontextmanager
 from . import content
 
 
@@ -25,9 +29,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
-@pytest.fixture(scope="session", params=["sharepoint"])
-def fs(request):
-    if request.param == "sharepoint":
+def _create_fs(request, fs_type, asynchronous=False) -> fsspec.AbstractFileSystem:
+    if fs_type == "sharepoint":
         # Read configuration from command line arguments or environment variables
         # TODO
         client_id = request.config.getoption("--client-id") or os.getenv("CLIENT_ID")
@@ -40,18 +43,29 @@ def fs(request):
         token = {
             "access_token": None,
             "refresh_token": None,
-            "expires_in": 10,
+            "expires_at": 10,
         }
 
         # TO BE REMOVED
         try:
             from . import private
 
-            tenant_id, site_id, drive_id, client_id, client_secret, token = (
+            tenant_id, site_id, drive_id, client_id, client_secret = (
                 private.get_oauth2_client_params()
             )
         except ImportError:
             pass
+        # for the token we read the content of the token.json file
+        # if it exists
+        try:
+            import json
+
+            with open("token.json") as f:
+                token = json.load(f)
+        except FileNotFoundError:
+            pass
+
+        # END TO BE REMOVED
 
         oauth2_client_params = {
             "scope": "offline_access openid Files.ReadWrite.All Sites.ReadWrite.All",
@@ -61,26 +75,53 @@ def fs(request):
             "token_endpoint": f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
         }
 
-        def refresh_token_response(resp):
-            content = resp.json()
+        def refresh_token_response(resp, initial_token):
+            token = resp.json()
+            token["expires_at"] = int(token["expires_in"]) + int(time.time())
+            # only keep the access token, the refresh token and the expire at time
+            token = {
+                k: v
+                for k, v in token.items()
+                if k in ["access_token", "refresh_token", "expires_at"]
+            }
+            with open("token.json", "w") as f:
+                json.dump(token, f, indent=4)
             print("refresh:", content)
-            token["access_token"] = content["access_token"]
-            token["refresh_token"] = content["refresh_token"]
-            token["expires_in"] = content["expires_in"]
+            initial_token.update(token)
+            return resp
 
         # Initialize SharePointFS with the configuration
-        sp_fs = SharepointFS(
-            site_id=site_id,
-            drive_id=drive_id,
-            oauth2_client_params=oauth2_client_params,
-        )
+        kwargs = {
+            "site_id": site_id,
+            "drive_id": drive_id,
+            "oauth2_client_params": oauth2_client_params,
+            "asynchronous": asynchronous,
+        }
+        if asynchronous:
+            kwargs["cache_type"] = "none"
+        sp_fs = SharepointFS(**kwargs)
 
         sp_fs.client.register_compliance_hook(
-            "refresh_token_response", refresh_token_response
+            "refresh_token_response",
+            partial(refresh_token_response, initial_token=token),
         )
 
         # Yield the initialized object
-        yield sp_fs
+        return sp_fs
+
+
+@pytest.fixture(scope="session", params=["sharepoint"])
+def fs(request):
+    # we use a fixture to be able to lanch the tests suite with different
+    # filesystems supported by the microsoft graph api
+    yield _create_fs(request, request.param, asynchronous=False)
+
+
+@pytest.fixture(scope="session", params=["sharepoint"])
+def afs(request):
+    # we use a fixture to be able to lanch the tests suite with different
+    # filesystems supported by the microsoft graph api
+    yield _create_fs(request, request.param, asynchronous=True)
 
 
 class MsGraphTempFS(DirFileSystem):
@@ -94,22 +135,17 @@ class MsGraphTempFS(DirFileSystem):
                 path = "/" + path
         return path
 
-
-@pytest.fixture
-def temp_dir(fs):
-    # create a temporary directory name
-    temp_dir_name = str(uuid.uuid4())
-    fs.mkdir(temp_dir_name)
-
-    yield temp_dir_name
-
-    # cleanup
-    fs.rmdir(temp_dir_name)
+    def _join(self, path):
+        # we override the DirFileSystem method since all the path are absolute
+        if isinstance(path, str):
+            if path.startswith("/"):
+                path = path[1:]
+        return super()._join(path)
 
 
 @contextmanager
 def _temp_dir(storagefs):
-    # create a temporary directory name
+    # create a temporary directory
     temp_dir_name = f"/{str(uuid.uuid4())}"
     storagefs.mkdir(temp_dir_name)
     try:
@@ -118,6 +154,19 @@ def _temp_dir(storagefs):
     finally:
         # cleanup
         storagefs.rm(temp_dir_name, recursive=True)
+
+
+@asynccontextmanager
+async def _a_temp_dir(storagefs):
+    # create a temporary directory in async fs
+    temp_dir_name = f"/{str(uuid.uuid4())}"
+    await storagefs._mkdir(temp_dir_name)
+    try:
+
+        yield temp_dir_name
+    finally:
+        # cleanup
+        await storagefs._rm(temp_dir_name, recursive=True)
 
 
 @pytest.fixture(scope="module")
@@ -148,6 +197,38 @@ def sample_fs(fs):
         yield sfs
 
 
+@pytest_asyncio.fixture(scope="module")
+async def sample_afs(afs):
+    """A temporary async filesystem with sample files and directories created from the
+    content module.
+
+    We use the fsspec dir filesystem to interact with the filesystem to
+    test so we can use a temporary directory into the tested filesystem
+    as root to avoid polluting the real filesystem and ensure isolation
+    between tests.
+    """
+    async with _a_temp_dir(afs) as temp_dir_name:
+        sfs = MsGraphTempFS(path=temp_dir_name, asynchronous=True, fs=afs)
+        for flist in [
+            content.files,
+            content.csv_files,
+            content.text_files,
+            content.glob_files,
+        ]:
+            for path, data in flist.items():
+                root, _filename = os.path.split(path)
+                if root:
+                    await sfs._makedirs(root, exist_ok=True)
+                # TODO does not work with async open
+                stream_file = await sfs.fs.open_async(sfs._join(path), "wb")
+                try:
+                    await stream_file.write(data)
+                finally:
+                    await stream_file.close()
+        await sfs._makedirs("/emptydir")
+        yield sfs
+
+
 @pytest.fixture(scope="module")
 def temp_fs(fs):
     """A temporary empty filesystem.
@@ -159,3 +240,16 @@ def temp_fs(fs):
     """
     with _temp_dir(fs) as temp_dir_name:
         yield MsGraphTempFS("dir", path=temp_dir_name, fs=fs)
+
+
+@pytest_asyncio.fixture(scope="module")
+def temp_afs(afs):
+    """A temporary empty async filesystem.
+
+    We use the fsspec dir filesystem to interact with the filesystem to
+    test so we can use a temporary directory into the tested filesystem
+    as root to avoid polluting the real filesystem and ensure isolation
+    between tests.
+    """
+    with _a_temp_dir(afs) as temp_dir_name:
+        yield MsGraphTempFS("dir", path=temp_dir_name, fs=afs)

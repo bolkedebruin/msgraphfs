@@ -53,6 +53,7 @@ def wrap_http_not_found_exceptions(func):
 @wrap_http_not_found_exceptions
 async def _http_call_with_retry(func, *, args=(), kwargs=None, retries) -> Response:
     kwargs = kwargs or {}
+    retries = 1
     for i in range(retries):
         try:
             response = await func(*args, **kwargs)
@@ -72,7 +73,9 @@ async def _http_call_with_retry(func, *, args=(), kwargs=None, retries) -> Respo
                 await asyncio.sleep(min(1.7**i * 0.1, 15))
                 continue
             if e.response.status_code != 404:
-                _logger.error("HTTP error: %s", response.content)
+                _logger.error(
+                    "HTTP error %s: %s", e.response.status_code, e.response.content
+                )
             raise e
 
 
@@ -93,11 +96,11 @@ class AbstractMSGraphFS(AsyncFileSystem):
         oauth2_client_params: dict,
         **kwargs,
     ):
-        super_kwargs = {
-            k: kwargs.pop(k)
-            for k in ["use_listings_cache", "listings_expiry_time", "max_paths"]
-            if k in kwargs
-        }  # passed to fsspec superclass... we don't support directory caching
+        super_kwargs = kwargs.copy()
+        super_kwargs.pop("use_listings_cache", None)
+        super_kwargs.pop("listings_expiry_time", None)
+        super_kwargs.pop("max_paths", None)
+        # passed to fsspec superclass... we don't support directory caching
         super().__init__(**super_kwargs)
 
         self.client: AsyncOAuth2Client = AsyncOAuth2Client(
@@ -569,17 +572,6 @@ class AsyncStreamedFileMixin:
         self._append_mode = "a" in self.mode and self.item_id is not None
         self._reset_session_info()
 
-    @property
-    def _item_id(self) -> str | None:
-        """Get the item ID of the file into Sharepoint.
-
-        Returns:
-            str: The item ID of the file if it exists, otherwise None.
-        """
-        if not hasattr(self, "__item_id"):
-            self.__item_id = self.fs.get_item_id(self.path)
-        return self.__item_id
-
     async def _create_upload_session(self) -> tuple[str, datetime.datetime]:
         """Create a new upload session for the file.
 
@@ -749,9 +741,8 @@ class AsyncStreamedFileMixin:
 
     async def _fetch_range(self, start, end) -> bytes:
         """Get the specified set of bytes from remote."""
-        return await self.fs._cat_file(
-            self.path, start=start, end=end, item_id=self._item_id
-        )
+        item_id = await self.fs._get_item_id(self.path)
+        return await self.fs._cat_file(self.path, start=start, end=end, item_id=item_id)
 
     @property
     def loop(self):
