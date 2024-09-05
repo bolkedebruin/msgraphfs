@@ -86,7 +86,6 @@ def _create_fs(request, fs_type, asynchronous=False) -> fsspec.AbstractFileSyste
             }
             with open("token.json", "w") as f:
                 json.dump(token, f, indent=4)
-            print("refresh:", content)
             initial_token.update(token)
             return resp
 
@@ -99,6 +98,7 @@ def _create_fs(request, fs_type, asynchronous=False) -> fsspec.AbstractFileSyste
         }
         if asynchronous:
             kwargs["cache_type"] = "none"
+        SharepointFS.clear_instance_cache()
         sp_fs = SharepointFS(**kwargs)
 
         sp_fs.client.register_compliance_hook(
@@ -110,14 +110,17 @@ def _create_fs(request, fs_type, asynchronous=False) -> fsspec.AbstractFileSyste
         return sp_fs
 
 
-@pytest.fixture(scope="session", params=["sharepoint"])
+FS_TYPES = ["sharepoint"]
+
+
+@pytest.fixture(scope="module", params=FS_TYPES)
 def fs(request):
     # we use a fixture to be able to lanch the tests suite with different
     # filesystems supported by the microsoft graph api
     yield _create_fs(request, request.param, asynchronous=False)
 
 
-@pytest.fixture(scope="session", params=["sharepoint"])
+@pytest.fixture(scope="module", params=FS_TYPES)
 def afs(request):
     # we use a fixture to be able to lanch the tests suite with different
     # filesystems supported by the microsoft graph api
@@ -141,6 +144,19 @@ class MsGraphTempFS(DirFileSystem):
             if path.startswith("/"):
                 path = path[1:]
         return super()._join(path)
+
+    # add missing mapper to async methods
+    async def _rmdir(self, path):
+        return await self.fs._rmdir(self._join(path))
+
+    async def _touch(self, path, **kwargs):
+        return await self.fs._touch(self._join(path), **kwargs)
+
+    async def _move(self, path1, path2, **kwargs):
+        return await self.fs._mv(self._join(path1), self._join(path2), **kwargs)
+
+    async def _open_async(self, path, mode, **kwargs):
+        return await self.fs.open_async(self._join(path), mode, **kwargs)
 
 
 @contextmanager
@@ -197,7 +213,7 @@ def sample_fs(fs):
         yield sfs
 
 
-@pytest_asyncio.fixture(scope="module")
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def sample_afs(afs):
     """A temporary async filesystem with sample files and directories created from the
     content module.
@@ -220,16 +236,15 @@ async def sample_afs(afs):
                 if root:
                     await sfs._makedirs(root, exist_ok=True)
                 # TODO does not work with async open
-                stream_file = await sfs.fs.open_async(sfs._join(path), "wb")
-                try:
+                async with await sfs.fs.open_async(
+                    sfs._join(path), "wb"
+                ) as stream_file:
                     await stream_file.write(data)
-                finally:
-                    await stream_file.close()
         await sfs._makedirs("/emptydir")
         yield sfs
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 def temp_fs(fs):
     """A temporary empty filesystem.
 
@@ -239,11 +254,18 @@ def temp_fs(fs):
     between tests.
     """
     with _temp_dir(fs) as temp_dir_name:
-        yield MsGraphTempFS("dir", path=temp_dir_name, fs=fs)
+        yield MsGraphTempFS(path=temp_dir_name, fs=fs)
 
 
-@pytest_asyncio.fixture(scope="module")
-def temp_afs(afs):
+@pytest_asyncio.fixture(scope="function", params=FS_TYPES, loop_scope="function")
+async def function_afs(request):
+    # we use a fixture to be able to lanch the tests suite with different
+    # filesystems supported by the microsoft graph api
+    yield _create_fs(request, request.param, asynchronous=True)
+
+
+@pytest_asyncio.fixture(scope="function", loop_scope="function")
+async def temp_afs(function_afs):
     """A temporary empty async filesystem.
 
     We use the fsspec dir filesystem to interact with the filesystem to
@@ -251,5 +273,54 @@ def temp_afs(afs):
     as root to avoid polluting the real filesystem and ensure isolation
     between tests.
     """
-    with _a_temp_dir(afs) as temp_dir_name:
-        yield MsGraphTempFS("dir", path=temp_dir_name, fs=afs)
+    afs = function_afs
+    async with _a_temp_dir(afs) as temp_dir_name:
+        yield MsGraphTempFS(path=temp_dir_name, asynchronous=True, fs=afs)
+
+
+@pytest.fixture(scope="function")
+def temp_nested_fs(fs):
+    """A temporary empty filesystem with nested directories.
+
+    We use the fsspec dir filesystem to interact with the filesystem to
+    test so we can use a temporary directory into the tested filesystem
+    as root to avoid polluting the real filesystem and ensure isolation
+    between tests.
+    """
+    with _temp_dir(fs) as temp_dir_name:
+        sfs = MsGraphTempFS(path=temp_dir_name, fs=fs)
+        for path, data in content.text_files.items():
+            root, _filename = os.path.split(path)
+            if root:
+                sfs.makedirs(root, exist_ok=True)
+            with sfs.open(path, "wb") as f:
+                f.write(data)
+            sfs.touch("/emptyfile")
+        yield sfs
+
+
+@pytest_asyncio.fixture(scope="function", loop_scope="function")
+async def temp_nested_afs(function_afs):
+    """A temporary empty async filesystem with nested directories.
+
+    We use the fsspec dir filesystem to interact with the filesystem to
+    test so we can use a temporary directory into the tested filesystem
+    as root to avoid polluting the real filesystem and ensure isolation
+    between tests.
+    """
+    afs = function_afs
+    # is created within an other loop scope
+    async with _a_temp_dir(afs) as temp_dir_name:
+        sfs = MsGraphTempFS(path=temp_dir_name, asynchronous=True, fs=afs)
+        for path, data in content.text_files.items():
+            root, _filename = os.path.split(path)
+            if root:
+                await sfs._makedirs(root, exist_ok=True)
+            # TODO does not work with async open
+            stream_file = await sfs.fs.open_async(sfs._join(path), "wb")
+            try:
+                await stream_file.write(data)
+            finally:
+                await stream_file.close()
+            await sfs.fs._touch(sfs._join("/emptyfile"))
+        yield sfs

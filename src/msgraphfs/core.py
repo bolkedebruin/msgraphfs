@@ -13,11 +13,13 @@ from fsspec.asyn import (
     AbstractAsyncStreamedFile,
 )
 
+from fsspec.utils import tokenize
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
 
 from httpx import HTTPStatusError, Response
 from httpx._types import URLTypes
+
 
 HTTPX_RETRYABLE_ERRORS = (
     asyncio.TimeoutError,
@@ -261,6 +263,74 @@ class AbstractMSGraphFS(AsyncFileSystem):
 
     msgraph_patch = sync_wrapper(_msg_graph_patch)
 
+    ################################################
+    # Others methods
+    ################################################
+
+    async def _get_copy_status(self, url: str) -> dict[str:str]:
+        """Get the status of a copy operation.
+
+        The response will be a dictionary with the following keys
+        "status": The status of the copy operation. Possible values are:
+        "completed", "failed", "inProgress", "notStarted" "resource_id":
+        The ID of the resource that was copied. "percent_complete": The
+        percentage of the copy operation that has completed.
+        """
+        response = await httpx.AsyncClient().get(url)
+        value = response.json()
+        return {
+            "status": value.get("status"),
+            "resource_id": value.get("resourceId"),
+            "percent_complete": value.get("percentageComplete"),
+        }
+
+    get_copy_status = sync_wrapper(_get_copy_status)
+
+    async def _msggraph_item_copy(
+        self, path1: str, path2: str, wait_completion=True, **kwargs
+    ):
+        """Copy a path to another.
+
+        Parameters
+        ----------
+        path1 : str
+            Source path
+        path2 : str
+            Destination path
+        wait_completion : bool (=True)
+            In microsoft graph API, in many cases the copy action is performed
+            asynchronously. The response from the API will only indicate that the
+            copy operation was accepted or rejected; If wait_completion is True,
+            the method will return only after the copy operation is completed by
+            monitoring the status of the copy operation.
+            If wait_completion is False, the method will return immediately after the
+            call to the Microsoft Graph API with the URL where the status of the copy
+            operation can be monitored. You can use this URL to call the method get_copy_status
+            to monitor the status of the copy operation. (or _get_copy_status method
+            in the case of async running)
+        """
+        source_item_id = await self._get_item_id(path1, throw_on_missing=True)
+        url = self._path_to_url(path1, item_id=source_item_id, action="copy")
+        path2 = self._strip_protocol(path2)
+        parent_path, _file_name = path2.rsplit("/", 1)
+        item_reference = await self._get_item_reference(parent_path)
+        json = {
+            "parentReference": item_reference,
+            "name": _file_name,
+        }
+        response = await self._msgraph_post(url, json=json)
+        headers = response.headers
+        status_url = headers.get("Location")
+        if not wait_completion:
+            return status_url
+        while True:
+            status = await self._get_copy_status(status_url)
+            if status["status"] == "completed":
+                break
+            if status["status"] == "failed":
+                raise RuntimeError("Copy operation failed")
+            await asyncio.sleep(1)
+
     #############################################################
     # Implement required async methods for the fsspec interface
     #############################################################
@@ -337,7 +407,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         return response.content
 
     async def _pipe_file(self, path: str, value: bytes, **kwargs):
-        with self.open(path, "wb") as f:
+        async with await self.open_async(path, "wb") as f:
             await f.write(value)
 
     async def _get_file(self, rpath: str, lpath: str, **kwargs):
@@ -362,26 +432,51 @@ class AbstractMSGraphFS(AsyncFileSystem):
         await self._msgraph_delete(url)
         self.invalidate_cache(path)
 
-    async def cp_file(self, path1: str, path2: str, **kwargs):
-        source_item_id = await self._get_item_id(path1, throw_on_missing=True)
-        url = self._path_to_url(path1, item_id=source_item_id, action="copy")
-        path2 = self._strip_protocol(path2)
-        parent_path, _file_name = path2.rsplit("/", 1)
-        item_reference = await self._get_item_reference(parent_path)
-        json = {
-            "parentReference": item_reference,
-            "name": _file_name,
-        }
-        await self._msgraph_post(url, json=json)
+    async def _copy(
+        self,
+        path1,
+        path2,
+        recursive=False,
+        on_error=None,
+        maxdepth=None,
+        batch_size=None,
+        wait_completion=True,
+        **kwargs,
+    ):
+        if recursive:
+            return await self._msggraph_item_copy(
+                path1, path2, wait_completion=wait_completion, **kwargs
+            )
+        return await super()._copy(
+            path1,
+            path2,
+            recursive=recursive,
+            on_error=on_error,
+            maxdepth=maxdepth,
+            batch_size=batch_size,
+            wait_completion=wait_completion,
+            **kwargs,
+        )
+
+    async def _cp_file(self, path1: str, path2: str, wait_completion=True, **kwargs):
+        return await self._msggraph_item_copy(
+            path1, path2, wait_completion=wait_completion, **kwargs
+        )
 
     async def _isfile(self, path: str) -> bool:
         url = self._path_to_url(path)
-        response = await self._msgraph_get(url, params={"select": "file"})
+        try:
+            response = await self._msgraph_get(url, params={"select": "file"})
+        except FileNotFoundError:
+            return False
         return response.json().get("file") is not None
 
     async def _isdir(self, path: str) -> bool:
         url = self._path_to_url(path)
-        response = await self._msgraph_get(url, params={"select": "folder"})
+        try:
+            response = await self._msgraph_get(url, params={"select": "folder"})
+        except FileNotFoundError:
+            return False
         return response.json().get("folder") is not None
 
     async def _size(self, path: str) -> int:
@@ -394,7 +489,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         parent, child = path.rsplit("/", 1)
         parent_id = await self._get_item_id(parent)
         if not parent_id and not create_parents:
-            raise FileNotFoundError(f"Parent directory does not exist: {parent}")
+            raise FileNotFoundError(f"Parent directory does not exists: {parent}")
         if not parent_id:
             await self._mkdir(parent, create_parents=create_parents)
             parent_id = await self._get_item_id(parent)
@@ -422,7 +517,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
     async def _rmdir(self, path: str):
         if not await self._isdir(path):
             raise FileNotFoundError(f"Directory not found: {path}")
-        if not await self._ls(path):
+        if await self._ls(path):
             raise OSError(f"Directory not empty: {path}")
         item_id = await self._get_item_id(path, throw_on_missing=True)
         url = self._path_to_url(path, item_id=item_id)
@@ -432,12 +527,39 @@ class AbstractMSGraphFS(AsyncFileSystem):
     rmdir = sync_wrapper(_rmdir)  # not into the list of async methods to auto wrap
 
     async def _rm(self, path, recursive=False, batch_size=None, **kwargs):
-        if not recursive and await self._isdir(path) and await self._ls(path):
-            raise OSError(f"Directory not empty: {path}")
-        item_id = await self._get_item_id(path, throw_on_missing=True)
-        url = self._path_to_url(path, item_id=item_id)
-        await self._msgraph_delete(url)
-        self.invalidate_cache(path)
+        paths = path
+        if not isinstance(paths, list):
+            paths = [path]
+        for path in paths:
+            if not recursive and await self._isdir(path) and await self._ls(path):
+                raise OSError(f"Directory not empty: {path}")
+            item_id = await self._get_item_id(path, throw_on_missing=True)
+            url = self._path_to_url(path, item_id=item_id)
+            await self._msgraph_delete(url)
+            self.invalidate_cache(path)
+
+    async def _mv(self, path1, path2, **kwargs):
+        source_item_id = await self._get_item_id(path1, throw_on_missing=True)
+        url = self._path_to_url(path1, item_id=source_item_id)
+        path2 = self._strip_protocol(path2)
+        destination_item_id = await self._get_item_id(path2)
+        item_reference = None
+        name = None
+        if destination_item_id:
+            item_reference = await self._get_item_reference(path2)
+        else:
+            parent_path, name = path2.rsplit("/", 1)
+            item_reference = await self._get_item_reference(parent_path)
+        json = {
+            "parentReference": item_reference,
+        }
+        if name:
+            json["name"] = name
+
+        await self._msg_graph_patch(url, json=json)
+        self.invalidate_cache(path1)
+
+    mv = sync_wrapper(_mv)
 
     def _open(
         self,
@@ -475,6 +597,10 @@ class AbstractMSGraphFS(AsyncFileSystem):
             Additional parameters used for s3 methods.  Typically used for
             ServerSideEncryption.
         """
+        if ("r" in mode or "a" in mode) and not self.isfile(path):
+            raise FileNotFoundError(f"File not found: {path}")
+        if "a" in mode and not size:
+            size = self.size(path)
         return SharepointBuffredFile(
             fs=self,
             path=path,
@@ -484,13 +610,28 @@ class AbstractMSGraphFS(AsyncFileSystem):
             cache_type=cache_type,
             cache_options=cache_options,
             size=size,
+            item_id=self.get_item_id(path),
             **kwargs,
         )
 
     async def open_async(self, path, mode="rb", **kwargs):
+        if ("r" in mode or "a" in mode) and not await self._isfile(path):
+            raise FileNotFoundError(f"File not found: {path}")
         if "b" not in mode or kwargs.get("compression"):
             raise ValueError
-        return SharepointStreamedFile(self, path, mode, **kwargs)
+        size = None
+        item_id = await self._get_item_id(path, throw_on_missing=False)
+        if "rb" in mode or "a" in mode:
+            # we must provice the size of the file to the constructor
+            # to avoid the need to call the info method from within the constructor
+            # since in case of async running, the _info method is a coroutine
+            # and it's not allowed to call a coroutine from a constructor. If the
+            # size is provided, the info method will not be called from the constructor
+            info = await self._info(path)
+            size = info["size"]
+        return SharepointStreamedFile(
+            self, path, mode, size=size, item_id=item_id, **kwargs
+        )
 
     async def _touch(self, path, truncate=True, item_id=None, **kwargs):
         # if the file exists, update the last modified date time
@@ -519,6 +660,30 @@ class AbstractMSGraphFS(AsyncFileSystem):
         self.invalidate_cache(path)
 
     touch = sync_wrapper(_touch)
+
+    async def _checksum(self, path, refresh=False):
+        """Unique value for current version of file.
+
+        If the checksum is the same from one moment to another, the contents
+        are guaranteed to be the same. If the checksum changes, the contents
+        *might* have changed.
+
+        Parameters
+        ----------
+        path : string/bytes
+            path of file to get checksum for
+        refresh : bool (=False)
+            if False, look in local cache for file details first
+        """
+
+        info = await self._info(path, refresh=refresh)
+
+        if info["type"] != "directory":
+            return int(info["ETag"].strip('"').split("-")[0], 16)
+        else:
+            return int(tokenize(info), 16)
+
+    checksum = sync_wrapper(_checksum)
 
 
 class SharepointFS(AbstractMSGraphFS):
@@ -555,6 +720,13 @@ class SharepointFS(AbstractMSGraphFS):
 
         return f"{self.drive_url}/root{path}{action}"
 
+    async def _get_item_reference(self, path: str, item_id: str | None = None) -> dict:
+        item_reference = await super()._get_item_reference(path, item_id=item_id)
+        return {
+            "driveId": self.drive_id,
+            "id": item_reference["id"],
+        }
+
 
 class AsyncStreamedFileMixin:
     """Mixin for streamed file-like objects using async iterators."""
@@ -569,8 +741,17 @@ class AsyncStreamedFileMixin:
             # block_size must bet a multiple of 320 KiB
             if self.blocksize % (320 * 1024) != 0:
                 raise ValueError("block_size must be a multiple of 320 KiB")
+        self._item_id = kwargs.get("item_id")
         self._append_mode = "a" in self.mode and self.item_id is not None
+        if self._append_mode:
+            self.loc = kwargs.get("size", 0)
         self._reset_session_info()
+
+    @property
+    async def item_id(self):
+        if self._item_id is None:
+            self._item_id = await self.fs._get_item_id(self.path)
+        return self._item_id
 
     async def _create_upload_session(self) -> tuple[str, datetime.datetime]:
         """Create a new upload session for the file.
@@ -605,7 +786,8 @@ class AsyncStreamedFileMixin:
         """Check if the current upload session is expired."""
         if not self._upload_expiration_dt:
             return True
-        return datetime.datetime.now() > self._upload_expiration_dt
+        now = datetime.datetime.now(datetime.UTC)
+        return now > self._upload_expiration_dt
 
     def _reset_session_info(self):
         """Reset the upload session information."""
@@ -618,7 +800,7 @@ class AsyncStreamedFileMixin:
         headers = self.kwargs.get("headers", {})
         if "content-type" not in headers:
             headers["content-type"] = self.fs._guess_type(self.path)
-        item_id = await self.fs._get_item_id(self.path)
+        item_id = await self.item_id
         if not item_id:
             parent_path, file_name = self.path.rsplit("/", 1)
             parent_id = await self.fs._get_item_id(parent_path, throw_on_missing=True)
@@ -695,12 +877,13 @@ class AsyncStreamedFileMixin:
             chunk_to_write = False
         else:
             self.buffer.seek(0)
-            chunk_to_write = self.buffer.read(self.blocksize)
             if self._remaining_bytes:
-                chunk_to_write = self._remaining_bytes
+                chunk_to_write = self._remaining_bytes + self.buffer.read(
+                    self.blocksize - len(self._remaining_bytes)
+                )
                 self._remaining_bytes = None
-                # complete the block
-                chunk_to_write += self.buffer.read(self.blocksize - len(chunk_to_write))
+            else:
+                chunk_to_write = self.buffer.read(self.blocksize)
         # we must write into chunk of the same block size. We therefore need to
         # buffer the remaining bytes if the buffer is not a multiple of the block size
         while chunk_to_write:
