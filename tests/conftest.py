@@ -19,7 +19,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--client-secret", action="store", default=None, help="SharePoint client secret"
     )
     parser.addoption(
-        "--site-id", action="store", default=None, help="SharePoint site ID"
+        "--site-name", action="store", default=None, help="SharePoint site name"
     )
     parser.addoption(
         "--drive-id", action="store", default=None, help="SharePoint drive ID"
@@ -37,7 +37,7 @@ def _create_fs(request, fs_type, asynchronous=False) -> fsspec.AbstractFileSyste
         client_secret = request.config.getoption("--client-secret") or os.getenv(
             "CLIENT_SECRET"
         )
-        site_id = request.config.getoption("--site-id") or os.getenv("SITE_ID")
+        site_name = request.config.getoption("--site-name") or os.getenv("SITE_NAME")
         drive_id = request.config.getoption("--drive-id") or os.getenv("DRIVE_ID")
         tenant_id = request.config.getoption("--tenant-id") or os.getenv("TENANT_ID")
         token = {
@@ -50,7 +50,7 @@ def _create_fs(request, fs_type, asynchronous=False) -> fsspec.AbstractFileSyste
         try:
             from . import private
 
-            tenant_id, site_id, drive_id, client_id, client_secret = (
+            tenant_id, site_name, drive_id, client_id, client_secret = (
                 private.get_oauth2_client_params()
             )
         except ImportError:
@@ -92,7 +92,7 @@ def _create_fs(request, fs_type, asynchronous=False) -> fsspec.AbstractFileSyste
 
         # Initialize SharePointFS with the configuration
         kwargs = {
-            "site_id": site_id,
+            "site_name": site_name,
             "drive_id": drive_id,
             "oauth2_client_params": oauth2_client_params,
             "asynchronous": asynchronous,

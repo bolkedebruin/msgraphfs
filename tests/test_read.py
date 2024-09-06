@@ -354,7 +354,7 @@ def test_seek(sample_fs):
 @pytest.mark.asyncio(loop_scope="module")
 async def test_async_seek(sample_afs):
     fs = sample_afs
-    with await fs.fs.open_async(fs._join("nested/file2"), "rb") as f:
+    with await fs._open_async("nested/file2", "rb") as f:
         f.seek(1000)
         with pytest.raises(ValueError):
             f.seek(-1)
@@ -569,3 +569,26 @@ def test_readuntil(sample_fs):
             if not block:
                 break
     assert b"".join(out) == data
+
+
+def test_shallow_find(sample_fs):
+    """Test that find method respects maxdepth.
+
+    Verify that the ``find`` method respects the ``maxdepth`` parameter.  With
+    ``maxdepth=1``, the results of ``find`` should be the same as those of
+    ``ls``, without returning subdirectories.
+    """
+    path = "/"
+    ls_output = sample_fs.ls(path, detail=False)
+    assert sorted(ls_output + [path]) == sample_fs.find(path, maxdepth=1, withdirs=True)
+    assert sorted(ls_output) == sample_fs.glob("/*")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_async_shallow_find(sample_afs):
+    path = "/"
+    ls_output = await sample_afs._ls(path, detail=False)
+    assert sorted(ls_output + [path]) == await sample_afs._find(
+        path, maxdepth=1, withdirs=True
+    )
+    assert sorted(ls_output) == await sample_afs._glob("/*")

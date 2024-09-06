@@ -37,12 +37,13 @@ _logger = logging.getLogger(__name__)
 
 def parse_range_header(range_header):
     # Regular expression to match a range header like 'bytes=0-499'
-    range_pattern = r"bytes=(\d+)-(\d+)?"
+    range_pattern = r"bytes=(\d+)?-(\d+)?"
 
     match = re.match(range_pattern, range_header)
 
     if match:
-        start = int(match.group(1))
+        start = match.group(1)
+        start = int(start) if start else None  # Convert to int if not None
         end = match.group(2)  # Could be None if range is 'bytes=100-'
         end = int(end) if end else None  # Convert to int if not None
         return start, end
@@ -127,6 +128,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         )
         if not self.asynchronous:
             weakref.finalize(self, self.close_http_session, self.client, self.loop)
+        self.use_recycle_bin = kwargs.get("use_recycle_bin", False)
 
     @staticmethod
     def close_http_session(
@@ -187,6 +189,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             "mtime": datetime.datetime.fromisoformat(
                 drive_item_info.get("lastModifiedDateTime", "1970-01-01T00:00:00Z")
             ),
+            "id": drive_item_info.get("id"),
         }
         if _type == "file":
             data["mimetype"] = drive_item_info.get("file", {}).get("mimeType", "")
@@ -273,11 +276,11 @@ class AbstractMSGraphFS(AsyncFileSystem):
 
     msgraph_delete = sync_wrapper(_msgraph_delete)
 
-    async def _msg_graph_patch(self, url: URLTypes, *args, **kwargs) -> Response:
+    async def _msgraph_patch(self, url: URLTypes, *args, **kwargs) -> Response:
         """Send a PATCH request to the Microsoft Graph API."""
         return await self._call_msgraph("PATCH", url, *args, **kwargs)
 
-    msgraph_patch = sync_wrapper(_msg_graph_patch)
+    msgraph_patch = sync_wrapper(_msgraph_patch)
 
     ################################################
     # Others methods
@@ -352,6 +355,17 @@ class AbstractMSGraphFS(AsyncFileSystem):
             if status["status"] == "failed":
                 raise RuntimeError("Copy operation failed")
             await asyncio.sleep(1)
+
+    async def __delete_item(self, path: str, item_id: str | None = None, **kwargs):
+        item_id = item_id or await self._get_item_id(path, throw_on_missing=True)
+        use_recycle_bin = kwargs.get("use_recycle_bin", self.use_recycle_bin)
+        if use_recycle_bin:
+            url = self._path_to_url(path, item_id=item_id)
+            await self._msgraph_delete(url)
+        else:
+            url = self._path_to_url(path, item_id=item_id, action="permanentDelete")
+            await self._msgraph_post(url)
+        self.invalidate_cache(path)
 
     #############################################################
     # Implement required async methods for the fsspec interface
@@ -442,8 +456,8 @@ class AbstractMSGraphFS(AsyncFileSystem):
                 size = await self._size(path)
                 if rend > size:
                     rend = size
-            if rstart and rend and rstart >= rend:
-                return b""
+                if rstart and rend and (rstart > rend or rstart == rend == size):
+                    return b""
             headers["Range"] = range
         response = await self._msgraph_get(url, headers=headers)
         return response.content
@@ -469,10 +483,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
     async def _rm_file(self, path: str, item_id: str | None = None, **kwargs):
         if not await self._isfile(path):
             raise FileNotFoundError(f"File not found: {path}")
-        item_id = item_id or await self._get_item_id(path, throw_on_missing=True)
-        url = self._path_to_url(path, item_id=item_id)
-        await self._msgraph_delete(url)
-        self.invalidate_cache(path)
+        await self.__delete_item(path, item_id=item_id, **kwargs)
 
     async def _copy(
         self,
@@ -556,15 +567,26 @@ class AbstractMSGraphFS(AsyncFileSystem):
             else:
                 raise e
 
-    async def _rmdir(self, path: str):
+    async def _rmdir(self, path: str, **kwargs):
+        """Remove a directory if it's empty.
+
+        Parameters
+        ----------
+        path : str
+            Path of the directory to
+
+        use_recycle_bin : bool
+            If specified, the value will be used instead of the default value
+            of the use_recycle_bin attribute of the class. If the value is True, the
+            directory will be deleted and moved to the recycle bin. If False,
+            the directory will be permanently deleted. Default is False.
+        """
         if not await self._isdir(path):
             raise FileNotFoundError(f"Directory not found: {path}")
         if await self._ls(path):
             raise OSError(f"Directory not empty: {path}")
         item_id = await self._get_item_id(path, throw_on_missing=True)
-        url = self._path_to_url(path, item_id=item_id)
-        await self._msgraph_delete(url)
-        self.invalidate_cache(path)
+        await self.__delete_item(path, item_id=item_id, **kwargs)
 
     rmdir = sync_wrapper(_rmdir)  # not into the list of async methods to auto wrap
 
@@ -575,10 +597,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         for path in paths:
             if not recursive and await self._isdir(path) and await self._ls(path):
                 raise OSError(f"Directory not empty: {path}")
-            item_id = await self._get_item_id(path, throw_on_missing=True)
-            url = self._path_to_url(path, item_id=item_id)
-            await self._msgraph_delete(url)
-            self.invalidate_cache(path)
+            await self.__delete_item(path, **kwargs)
 
     async def _mv(self, path1, path2, **kwargs):
         source_item_id = await self._get_item_id(path1, throw_on_missing=True)
@@ -598,7 +617,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         if name:
             json["name"] = name
 
-        await self._msg_graph_patch(url, json=json)
+        await self._msgraph_patch(url, json=json)
         self.invalidate_cache(path1)
 
     mv = sync_wrapper(_mv)
@@ -643,7 +662,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             raise FileNotFoundError(f"File not found: {path}")
         if "a" in mode and not size:
             size = self.size(path)
-        return SharepointBuffredFile(
+        return MSGraphBuffredFile(
             fs=self,
             path=path,
             mode=mode,
@@ -671,7 +690,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             # size is provided, the info method will not be called from the constructor
             info = await self._info(path)
             size = info["size"]
-        return SharepointStreamedFile(
+        return MSGrpahStreamedFile(
             self, path, mode, size=size, item_id=item_id, **kwargs
         )
 
@@ -732,8 +751,11 @@ class SharepointFS(AbstractMSGraphFS):
     """A filesystem that represents a SharePoint site dirve as a filesystem.
 
     parameters:
-    site_id (str): The ID of the SharePoint site.
     drive_id (str): The ID of the SharePoint drive.
+    site_name (str): The name of the SharePoint site (optional, only used to list the recycle bin items).
+    use_recycle_bin: bool (=False)
+        If True, when a file is deleted, it will be moved to the recycle bin.
+        If False, the file will be permanently deleted. Default is False.
     oauth2_client_params (dict): Parameters for the OAuth2 client to use for
         authentication. see https://docs.authlib.org/en/latest/client/api.html#authlib.integrations.httpx_client.AsyncOAuth2Client
     """
@@ -742,13 +764,13 @@ class SharepointFS(AbstractMSGraphFS):
 
     def __init__(
         self,
-        site_id: str,
         drive_id: str,
         oauth2_client_params: dict,
+        site_name: str | None = None,
         **kwargs,
     ):
         super().__init__(oauth2_client_params=oauth2_client_params, **kwargs)
-        self.site_id: str = site_id
+        self.site_name: str = site_name
         self.drive_id: str = drive_id
         self.drive_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}"
 
@@ -766,12 +788,32 @@ class SharepointFS(AbstractMSGraphFS):
 
         return f"{self.drive_url}/root{path}{action}"
 
+    async def _get_site_id(self) -> str:
+        url = f"https://graph.microsoft.com/v1.0/sites?search=¼{self.site_name}"
+        response = await self._msgraph_get(url)
+        return response.json()["value"][0]["id"]
+
     async def _get_item_reference(self, path: str, item_id: str | None = None) -> dict:
         item_reference = await super()._get_item_reference(path, item_id=item_id)
         return {
             "driveId": self.drive_id,
             "id": item_reference["id"],
         }
+
+    async def _get_recycle_bin_items(self) -> list[dict]:
+        """Get the items in the recycle bin. (Beta!!)
+
+        Returns:
+            list[dict]: A list of dictionaries with information about the items in the recycle bin.
+
+        see https://docs.microsoft.com/en-us/graph/api/resources/driveitem?view=graph-rest-1.0
+        """
+        site_id = await self._get_site_id()
+        url = f"https://graph.microsoft.com/beta/sites/{site_id}/recycleBin/items"
+        response = await self._msgraph_get(url)
+        return response.json().get("value", [])
+
+    get_recycle_bin_items = sync_wrapper(_get_recycle_bin_items)
 
 
 class AsyncStreamedFileMixin:
@@ -998,7 +1040,7 @@ class AsyncStreamedFileMixin:
         return self.fs.loop
 
 
-class SharepointBuffredFile(AsyncStreamedFileMixin, AbstractBufferedFile):
+class MSGraphBuffredFile(AsyncStreamedFileMixin, AbstractBufferedFile):
     """A file-like object representing a file in a SharePoint drive.
 
     Parameters
@@ -1085,7 +1127,7 @@ class SharepointBuffredFile(AsyncStreamedFileMixin, AbstractBufferedFile):
     _fetch_range = sync_wrapper(AsyncStreamedFileMixin._fetch_range)
 
 
-class SharepointStreamedFile(AsyncStreamedFileMixin, AbstractAsyncStreamedFile):
+class MSGrpahStreamedFile(AsyncStreamedFileMixin, AbstractAsyncStreamedFile):
     """A file-like object representing a file in a SharePoint drive.
 
     Parameters
