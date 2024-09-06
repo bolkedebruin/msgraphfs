@@ -73,6 +73,7 @@ def _create_fs(request, fs_type, asynchronous=False) -> fsspec.AbstractFileSyste
             "client_secret": client_secret,
             "token": token,
             "token_endpoint": f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
+            "timeout": 10.0,
         }
 
         def refresh_token_response(resp, initial_token):
@@ -158,6 +159,12 @@ class MsGraphTempFS(DirFileSystem):
     async def _open_async(self, path, mode, **kwargs):
         return await self.fs.open_async(self._join(path), mode, **kwargs)
 
+    async def _modified(self, path):
+        return await self.fs._modified(self._join(path))
+
+    async def _created(self, path):
+        return await self.fs._created(self._join(path))
+
 
 @contextmanager
 def _temp_dir(storagefs):
@@ -235,10 +242,7 @@ async def sample_afs(afs):
                 root, _filename = os.path.split(path)
                 if root:
                     await sfs._makedirs(root, exist_ok=True)
-                # TODO does not work with async open
-                async with await sfs.fs.open_async(
-                    sfs._join(path), "wb"
-                ) as stream_file:
+                async with await sfs._open_async(path, "wb") as stream_file:
                     await stream_file.write(data)
         await sfs._makedirs("/emptydir")
         yield sfs
@@ -316,11 +320,7 @@ async def temp_nested_afs(function_afs):
             root, _filename = os.path.split(path)
             if root:
                 await sfs._makedirs(root, exist_ok=True)
-            # TODO does not work with async open
-            stream_file = await sfs.fs.open_async(sfs._join(path), "wb")
-            try:
+            async with await sfs._open_async(path, "wb") as stream_file:
                 await stream_file.write(data)
-            finally:
-                await stream_file.close()
             await sfs.fs._touch(sfs._join("/emptyfile"))
         yield sfs

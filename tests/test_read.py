@@ -484,3 +484,88 @@ def test_writable(temp_fs):
 
     with temp_fs.open(path, "rb") as f:
         assert not f.writable()
+
+
+def test_cat(sample_fs):
+    fs = sample_fs
+    all_items = chain.from_iterable(
+        [content.files.items(), content.csv_files.items(), content.text_files.items()]
+    )
+    for k, data in all_items:
+        read = fs.cat(f"/{k}")
+        assert read == data
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_async_cat(sample_afs):
+    fs = sample_afs
+    all_items = chain.from_iterable(
+        [content.files.items(), content.csv_files.items(), content.text_files.items()]
+    )
+    for k, data in all_items:
+        read = await fs._cat(f"/{k}")
+        assert read == data
+
+
+def test_read_block(sample_fs):
+    fs = sample_fs
+    path = "csv/2014-01-01.csv"
+    data = content.csv_files[path]
+    out = []
+    with fs.open(path, "rb", block_size=3) as f:
+        while True:
+            block = f.read(20)
+            out.append(block)
+            if not block:
+                break
+    assert b"".join(out) == data
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_async_read_block(sample_afs):
+    fs = sample_afs
+    path = "csv/2014-01-01.csv"
+    data = content.csv_files[path]
+    out = []
+    async with await fs._open_async(path, "rb", block_size=3) as f:
+        while True:
+            block = await f.read(20)
+            out.append(block)
+            if not block:
+                break
+    assert b"".join(out) == data
+
+
+def test_readinto(sample_fs):
+    fs = sample_fs
+    path = "csv/2014-01-01.csv"
+    data = content.csv_files[path]
+    out = bytearray(len(data))
+    with fs.open(path, "rb") as f:
+        f.readinto(out)
+    assert out == data
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_async_readinto(sample_afs):
+    fs = sample_afs
+    path = "csv/2014-01-01.csv"
+    data = content.csv_files[path]
+    out = bytearray(len(data))
+    async with await fs._open_async(path, "rb") as f:
+        await f.readinto(out)
+    assert out == data
+
+
+def test_readuntil(sample_fs):
+    fs = sample_fs
+    path = "csv/2014-01-01.csv"
+    data = content.csv_files[path]
+    out = []
+    with fs.open(path, "rb") as f:
+        while True:
+            block = f.readuntil(b"\n")
+            out.append(block)
+            if not block:
+                break
+    assert b"".join(out) == data

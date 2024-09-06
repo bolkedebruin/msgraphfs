@@ -1,3 +1,4 @@
+import re
 import asyncio
 import datetime
 import mimetypes
@@ -32,6 +33,21 @@ HTTPX_RETRYABLE_HTTP_STATUS_CODES = (500, 502, 503, 504)
 
 
 _logger = logging.getLogger(__name__)
+
+
+def parse_range_header(range_header):
+    # Regular expression to match a range header like 'bytes=0-499'
+    range_pattern = r"bytes=(\d+)-(\d+)?"
+
+    match = re.match(range_pattern, range_header)
+
+    if match:
+        start = int(match.group(1))
+        end = match.group(2)  # Could be None if range is 'bytes=100-'
+        end = int(end) if end else None  # Convert to int if not None
+        return start, end
+    else:
+        raise ValueError("Invalid Range header format")
 
 
 def wrap_http_not_found_exceptions(func):
@@ -308,6 +324,12 @@ class AbstractMSGraphFS(AsyncFileSystem):
             operation can be monitored. You can use this URL to call the method get_copy_status
             to monitor the status of the copy operation. (or _get_copy_status method
             in the case of async running)
+
+            Note: the status URL does not require authentication to be accessed. It can be
+            accessed by anyone who has the URL since it's a temporary URL that is only valid
+            for a short period of time. It's particularly useful when you want to monitor the
+            status of the copy operation from a different process or machine (for exemple, in
+            a web application).
         """
         source_item_id = await self._get_item_id(path1, throw_on_missing=True)
         url = self._path_to_url(path1, item_id=source_item_id, action="copy")
@@ -334,6 +356,15 @@ class AbstractMSGraphFS(AsyncFileSystem):
     #############################################################
     # Implement required async methods for the fsspec interface
     #############################################################
+    async def _created(self, path: str) -> datetime.datetime:
+        return (await self._info(path))["time"]
+
+    created = sync_wrapper(_created)
+
+    async def _modified(self, path) -> datetime.datetime:
+        return (await self._info(path))["mtime"]
+
+    modified = sync_wrapper(_modified)
 
     async def _exists(self, path: str, **kwargs) -> bool:
         return await self._get_item_id(path) is not None
@@ -401,8 +432,19 @@ class AbstractMSGraphFS(AsyncFileSystem):
     ):
         url = self._path_to_url(path, item_id=item_id, action="content")
         headers = kwargs.get("headers", {})
-        if start is not None and end is not None:
-            headers["Range"] = f"bytes={start}-{end - 1}"
+        if start is not None or end is not None:
+            range = await self._process_limits(path, start, end)
+            # range is expressed as "bytes={start}-{end}"
+            # extract start and end values from the range string
+            # to know if we are at the end of the file
+            rstart, rend = parse_range_header(range)
+            if rend is not None:
+                size = await self._size(path)
+                if rend > size:
+                    rend = size
+            if rstart and rend and rstart >= rend:
+                return b""
+            headers["Range"] = range
         response = await self._msgraph_get(url, headers=headers)
         return response.content
 
@@ -712,7 +754,11 @@ class SharepointFS(AbstractMSGraphFS):
 
     def _path_to_url(self, path, item_id=None, action=None) -> str:
         action = action and f"/{action}" if action else ""
+        protos = (self.protocol,) if isinstance(self.protocol, str) else self.protocol
+        has_proto = any(path.startswith(proto) for proto in protos)
         path = self._strip_protocol(path).rstrip("/")
+        if has_proto and path and not path.startswith("/"):
+            path = "/" + path
         if path:
             path = f":{path}:"
         if item_id:
@@ -737,7 +783,7 @@ class AsyncStreamedFileMixin:
         if block_size == "default":
             block_size = None
         self.blocksize = block_size if block_size is not None else self.fs.blocksize
-        if "w" in self.mode or "b" in self.mode:
+        if "w" in self.mode or "a" in self.mode:
             # block_size must bet a multiple of 320 KiB
             if self.blocksize % (320 * 1024) != 0:
                 raise ValueError("block_size must be a multiple of 320 KiB")
@@ -795,6 +841,7 @@ class AsyncStreamedFileMixin:
         self._upload_expiration_dt = None
         self._chunk_start_pos = 0
         self._remaining_bytes = None
+        self._write_called = False
 
     async def _upload_content_at_once(self, data):
         headers = self.kwargs.get("headers", {})
@@ -825,6 +872,9 @@ class AsyncStreamedFileMixin:
 
     async def _commit(self):
         _logger.debug("Commit %s" % self)
+        # Avoid resetting a file that has been opened in append mode
+        # and has not been written to.
+        append_no_write = self._append_mode and not self._write_called
         if self.tell() == 0:
             if self.buffer is not None:
                 _logger.debug("Empty file committed %s" % self)
@@ -832,14 +882,21 @@ class AsyncStreamedFileMixin:
                 await self.fs._touch(self.path, **self.kwargs)
         elif not self._upload_session_url:
             if self.buffer is not None:
-                _logger.debug("One-shot upload of %s" % self)
-                self.buffer.seek(0)
-                data = self.buffer.read()
-                await self._upload_content_at_once(data)
+                if not append_no_write:
+                    _logger.debug("One-shot upload of %s" % self)
+                    self.buffer.seek(0)
+                    data = self.buffer.read()
+                    await self._upload_content_at_once(data)
             else:
                 raise RuntimeError
 
-        await self._commit_upload_session()
+        if append_no_write:
+            # if not written, we must abort the upload session otherwise the file
+            # will be truncated
+            await self._abort_upload_session()
+        else:
+            await self._commit_upload_session()
+
         # complex cache invalidation, since file's appearance can cause several
         # directories
         parts = self.path.split("/")
@@ -858,6 +915,15 @@ class AsyncStreamedFileMixin:
         await self._abort_upload_session()
 
     discard = sync_wrapper(_discard)
+
+    async def _init_write_append_mode(self):
+        """Add the initial content of the file to the buffer."""
+        if self._append_mode and not self._write_called:
+            # If the file is opened in append mode, we must get the current content
+            # of the file and add it to the buffer.
+            content = await self.fs._cat_file(self.path, item_id=self._item_id)
+            self.buffer.write(content)
+            self.loc = len(content)
 
     ########################################################
     ## AbstractBufferedFile methods to implement or override
@@ -1001,6 +1067,16 @@ class SharepointBuffredFile(AsyncStreamedFileMixin, AbstractBufferedFile):
 
         AsyncStreamedFileMixin._init__mixin(self, **kwargs_mixin)
 
+    def write(self, data):
+        if not self._write_called:
+            self._init_write_append_mode()
+        self._write_called = True
+        return super().write(data)
+
+    _init_write_append_mode = sync_wrapper(
+        AsyncStreamedFileMixin._init_write_append_mode
+    )
+
     ########################################################
     ## AbstractBufferedFile methods to implement or override
     ########################################################
@@ -1077,3 +1153,19 @@ class SharepointStreamedFile(AsyncStreamedFileMixin, AbstractAsyncStreamedFile):
         )
 
         AsyncStreamedFileMixin._init__mixin(self, **kwargs_mixin)
+
+    async def write(self, data):
+        if not self._write_called:
+            await self._init_write_append_mode()
+        self._write_called = True
+        return await super().write(data)
+
+    async def readinto(self, b):
+        """Mirrors builtin file's readinto method.
+
+        https://docs.python.org/3/library/io.html#io.RawIOBase.readinto
+        """
+        out = memoryview(b).cast("B")
+        data = await self.read(out.nbytes)
+        out[: len(data)] = data
+        return len(data)
