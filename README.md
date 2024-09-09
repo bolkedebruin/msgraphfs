@@ -13,13 +13,13 @@ The supported applications are:
 ## SharePoint
 
 To use the SharePoint filesystem, you need to create a new instance of the
-`msgraphfs.SharepointFS` class. You can also use the `shpt` protocol to lookup
-the class using `fsspec.get_filesystem_class`.
+`msgraphfs.MSGDriveFS` class. You can also use the `msgd` protocol to lookup the
+class using `fsspec.get_filesystem_class`.
 
 ```python
 import msgraphfs
 
-fs = msgraphfs.SharepointFS(
+fs = msgraphfs.MSGDriveFS(
     client_id="YOUR_CLIENT_ID",
     drive_id="YOUR_DRIVE_ID",
     oauth2_client_params = {...})
@@ -34,7 +34,7 @@ with fs.open("/path/to/file.txt") as f:
 
 import fsspec
 
-fs = fsspec.get_filesystem_class("shpt")(
+fs = fsspec.get_filesystem_class("msgd")(
     client_id="YOUR_CLIENT
     drive_id="YOUR_DRIVE_ID",
     oauth2_client_params = {...})
@@ -48,8 +48,3 @@ fs.ls("/")
 ```bash
 pip install msgraphfs
 ```
-
-## TODO
-
-- [ ] Implement the OneDrive filesystem (Should be an extend of the base class
-      `msgraphfs.AbstractMSGraphFS` implementing the `_path_to_url` method)

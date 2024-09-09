@@ -5,7 +5,7 @@ from fsspec.implementations.dirfs import DirFileSystem
 import pytest
 import pytest_asyncio
 import os
-from msgraphfs import SharepointFS
+from msgraphfs import MSGDriveFS
 from functools import partial
 from contextlib import contextmanager, asynccontextmanager
 from . import content
@@ -30,7 +30,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def _create_fs(request, fs_type, asynchronous=False) -> fsspec.AbstractFileSystem:
-    if fs_type == "sharepoint":
+    if fs_type == "msgdrive":
         # Read configuration from command line arguments or environment variables
         # TODO
         client_id = request.config.getoption("--client-id") or os.getenv("CLIENT_ID")
@@ -99,8 +99,8 @@ def _create_fs(request, fs_type, asynchronous=False) -> fsspec.AbstractFileSyste
         }
         if asynchronous:
             kwargs["cache_type"] = "none"
-        SharepointFS.clear_instance_cache()
-        sp_fs = SharepointFS(**kwargs)
+        MSGDriveFS.clear_instance_cache()
+        sp_fs = MSGDriveFS(**kwargs)
 
         sp_fs.client.register_compliance_hook(
             "refresh_token_response",
@@ -111,7 +111,7 @@ def _create_fs(request, fs_type, asynchronous=False) -> fsspec.AbstractFileSyste
         return sp_fs
 
 
-FS_TYPES = ["sharepoint"]
+FS_TYPES = ["msgdrive"]
 
 
 @pytest.fixture(scope="module", params=FS_TYPES)

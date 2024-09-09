@@ -36,7 +36,7 @@ release = [
 ]
 
 [project.entry-points."fsspec.specs"]
-shpt="msgraphfs.SharepointFS"
+msgd="msgraphfs.MSGDriveFS"
 
 [project.urls]
 Source = "https://github.com/acsone/msgraphfs"

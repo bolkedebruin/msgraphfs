@@ -747,7 +747,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
     checksum = sync_wrapper(_checksum)
 
 
-class SharepointFS(AbstractMSGraphFS):
+class MSGDriveFS(AbstractMSGraphFS):
     """A filesystem that represents a SharePoint site dirve as a filesystem.
 
     parameters:
@@ -760,7 +760,7 @@ class SharepointFS(AbstractMSGraphFS):
         authentication. see https://docs.authlib.org/en/latest/client/api.html#authlib.integrations.httpx_client.AsyncOAuth2Client
     """
 
-    protocol = ["shpt"]
+    protocol = ["msgd"]
 
     def __init__(
         self,
@@ -1045,7 +1045,7 @@ class MSGraphBuffredFile(AsyncStreamedFileMixin, AbstractBufferedFile):
 
     Parameters
     ----------
-    fs: SharepointFS
+    fs: MSGDriveFS
         The filesystem this file is part of.
     path: str
         The path to the file.
@@ -1071,7 +1071,7 @@ class MSGraphBuffredFile(AsyncStreamedFileMixin, AbstractBufferedFile):
 
     def __init__(
         self,
-        fs: SharepointFS,
+        fs: MSGDriveFS,
         path: str,
         mode: str = "rb",
         block_size: int | None = None,
@@ -1132,7 +1132,7 @@ class MSGrpahStreamedFile(AsyncStreamedFileMixin, AbstractAsyncStreamedFile):
 
     Parameters
     ----------
-    fs: SharepointFS
+    fs: MSGDriveFS
         The filesystem this file is part of.
     path: str
         The path to the file.
@@ -1158,7 +1158,7 @@ class MSGrpahStreamedFile(AsyncStreamedFileMixin, AbstractAsyncStreamedFile):
 
     def __init__(
         self,
-        fs: SharepointFS,
+        fs: MSGDriveFS,
         path: str,
         mode: str = "rb",
         block_size: int | None = None,

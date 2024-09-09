@@ -478,7 +478,7 @@ def test_upload_with_prefix(temp_fs):
     sfs = temp_fs.fs
 
     data = content.text_files["nested/file1"]
-    path = f"shpt://{fs.path}/file1"
+    path = f"msgd://{fs.path}/file1"
     sfs.pipe_file(path, data)
     assert sfs.cat(path) == data
 
