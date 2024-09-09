@@ -165,6 +165,24 @@ class MsGraphTempFS(DirFileSystem):
     async def _created(self, path):
         return await self.fs._created(self._join(path))
 
+    async def _checkout(self, path, item_id=None):
+        return await self.fs._checkout(self._join(path), item_id)
+
+    def checkout(self, path, item_id=None):
+        return self.fs.checkout(self._join(path), item_id)
+
+    async def _checkin(self, path, comment=None, item_id=None):
+        return await self.fs._checkin(self._join(path), comment, item_id)
+
+    def checkin(self, path, comment=None, item_id=None):
+        return self.fs.checkin(self._join(path), comment, item_id)
+
+    async def _get_versions(self, path):
+        return await self.fs._get_versions(self._join(path))
+
+    def get_versions(self, path):
+        return self.fs.get_versions(self._join(path))
+
 
 @contextmanager
 def _temp_dir(storagefs):

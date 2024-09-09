@@ -182,7 +182,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             "name": self._get_path(drive_item_info),
             "size": drive_item_info.get("size", 0),
             "type": _type,
-            "sharepoint_info": drive_item_info,
+            "item_info": drive_item_info,
             "time": datetime.datetime.fromisoformat(
                 drive_item_info.get("createdDateTime", "1970-01-01T00:00:00Z")
             ),
@@ -383,7 +383,9 @@ class AbstractMSGraphFS(AsyncFileSystem):
     async def _exists(self, path: str, **kwargs) -> bool:
         return await self._get_item_id(path) is not None
 
-    async def _info(self, path: str, item_id: str | None = None, **kwargs) -> dict:
+    async def _info(
+        self, path: str, item_id: str | None = None, expand: str | None = None, **kwargs
+    ) -> dict:
         """Get information about a file or directory.
 
         Parameters
@@ -393,13 +395,27 @@ class AbstractMSGraphFS(AsyncFileSystem):
         item_id: str
             If given, the item_id will be used instead of the path to get
             information about the given path.
+        expand: str
+            A string used to expand the properties of the item. see
+            https://docs.microsoft.com/en-us/graph/api/resources/driveitem?view=graph-rest-1.0
+            For example, if you want to expand the properties to include the thumbnails,
+            you can pass "thumbnails" as the value of the expand parameter.
         """
+
         url = self._path_to_url(path, item_id=item_id)
-        response = await self._msgraph_get(url)
+        params = {}
+        if expand:
+            params = {"expand": expand}
+        response = await self._msgraph_get(url, params=params)
         return self._drive_item_info_to_fsspec_info(response.json())
 
     async def _ls(
-        self, path: str, detail: bool = True, item_id: str | None = None, **kwargs
+        self,
+        path: str,
+        detail: bool = True,
+        item_id: str | None = None,
+        expand: str | None = None,
+        **kwargs,
     ) -> list[dict | str]:
         """List files in the given path.
 
@@ -414,21 +430,32 @@ class AbstractMSGraphFS(AsyncFileSystem):
         item_id: str
             If given, the item_id will be used instead of the path to list
             the files in the given path.
+        expand: str
+            A string used to expand the properties of the item. see
+            https://docs.microsoft.com/en-us/graph/api/resources/driveitem?view=graph-rest-1.0
+            For example, if you want to expand the properties to include the thumbnails,
+            you can pass "thumbnails" as the value of the expand parameter.
         kwargs: may have additional backend-specific options, such as version
             information
         """
         url = self._path_to_url(path, item_id=item_id, action="children")
         params = None
+        if expand and not detail:
+            raise ValueError(
+                "The expand parameter can only be used when detail is True"
+            )
         if not detail:
             params = {"select": "name,parentReference"}
+        if expand:
+            params = {"expand": expand}
         response = await self._msgraph_get(url, params=params)
         items = response.json().get("value", [])
         if not items:
             # maybe the path is a file
             try:
-                item = await self._info(path)
+                item = await self._info(path, expand=expand, **kwargs)
                 if item["type"] == "file":
-                    items = [item["sharepoint_info"]]
+                    items = [item]
             except FileNotFoundError:
                 pass
         if detail:
@@ -745,6 +772,69 @@ class AbstractMSGraphFS(AsyncFileSystem):
             return int(tokenize(info), 16)
 
     checksum = sync_wrapper(_checksum)
+
+    ########################################################
+    # Additional methods specific to the Microsoft Graph API
+    ########################################################
+
+    async def _checkout(self, path: str, item_id: str | None = None):
+        """Check out a file to prevent others from editing the document, and prevent
+        your changes from being visible until the documented is checked in.
+
+        Parameters
+        ----------
+        path : str
+            Path of the file to check out
+        item_id: str
+            If given, the item_id will be used instead of the path to check
+            out the file.
+        """
+        if not await self._isfile(path):
+            raise FileNotFoundError(f"File not found: {path}")
+        url = self._path_to_url(path, item_id=item_id, action="checkout")
+        await self._msgraph_post(url)
+
+    checkout = sync_wrapper(_checkout)
+
+    async def _checkin(self, path: str, comment: str, item_id: str | None = None):
+        """Check in a checked out file, which makes the version of the document
+        available to others.
+
+        Parameters
+        ----------
+        path : str
+            Path of the file to check in
+        comment : str
+            Comment to add to the check-in
+        item_id: str
+            If given, the item_id will be used instead of the path to check
+            in the file.
+        """
+        if not await self._isfile(path):
+            raise FileNotFoundError(f"File not found: {path}")
+        url = self._path_to_url(path, item_id=item_id, action="checkin")
+        await self._msgraph_post(url, json={"comment": comment})
+
+    checkin = sync_wrapper(_checkin)
+
+    async def _get_versions(self, path: str, item_id: str | None = None) -> list[dict]:
+        """Get the versions of a file.
+
+        Parameters
+        ----------
+        path : str
+            Path of the file to get the versions of
+        item_id: str
+            If given, the item_id will be used instead of the path to get
+            the versions of the file.
+        """
+        if not await self._isfile(path):
+            raise FileNotFoundError(f"File not found: {path}")
+        url = self._path_to_url(path, item_id=item_id, action="versions")
+        response = await self._msgraph_get(url)
+        return response.json().get("value", [])
+
+    get_versions = sync_wrapper(_get_versions)
 
 
 class MSGDriveFS(AbstractMSGraphFS):

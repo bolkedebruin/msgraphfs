@@ -600,3 +600,15 @@ def test_rm_to_trash(temp_fs):
     assert not fs.exists(path)
     recycle_bin_items = {i["name"] for i in fs.fs.get_recycle_bin_items()}
     assert unique_name not in recycle_bin_items
+
+
+def test_lock_unlock(temp_fs):
+    fs = temp_fs
+    path = "/test.csv"
+    fs.touch(path)
+    versions = fs.get_versions(path)
+    assert len(versions) == 1
+    fs.checkout(path)
+    fs.checkin(path, comment="my update comment")
+    versions = fs.get_versions(path)
+    assert len(versions) == 2
