@@ -455,7 +455,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             try:
                 item = await self._info(path, expand=expand, **kwargs)
                 if item["type"] == "file":
-                    items = [item]
+                    items = [item["item_info"]]
             except FileNotFoundError:
                 pass
         if detail:
@@ -658,6 +658,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         autocommit=True,
         size=None,
         cache_options=None,
+        item_id=None,
         **kwargs,
     ):
         """Open a file for reading or writing.
@@ -681,6 +682,8 @@ class AbstractMSGraphFS(AsyncFileSystem):
         cache_options : dict
             Additional options passed to the constructor for the cache specified
             by `cache_type`.
+        item_id: str
+            If given, the item_id will be used instead of the path to open the file.
         kwargs: dict-like
             Additional parameters used for s3 methods.  Typically used for
             ServerSideEncryption.
@@ -698,7 +701,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             cache_type=cache_type,
             cache_options=cache_options,
             size=size,
-            item_id=self.get_item_id(path),
+            item_id=item_id or self.get_item_id(path),
             **kwargs,
         )
 
@@ -708,7 +711,9 @@ class AbstractMSGraphFS(AsyncFileSystem):
         if "b" not in mode or kwargs.get("compression"):
             raise ValueError
         size = None
-        item_id = await self._get_item_id(path, throw_on_missing=False)
+        item_id = kwargs.get("item_id") or await self._get_item_id(
+            path, throw_on_missing=False
+        )
         if "rb" in mode or "a" in mode:
             # we must provice the size of the file to the constructor
             # to avoid the need to call the info method from within the constructor

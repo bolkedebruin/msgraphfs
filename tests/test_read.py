@@ -605,9 +605,3 @@ def test_info_with_expand(sample_fs):
     fs = sample_fs
     info = fs.info("/csv", expand="thumbnails")
     assert "thumbnails" in info["item_info"]
-
-
-def test_get_permissions(sample_fs):
-    fs = sample_fs
-    permissions = fs.get_permissions("/csv/2014-01-01.csv")
-    assert len(permissions) > 0

@@ -6,11 +6,7 @@ through the Microsoft graph API (OneDrive, Sharepoint, etc).
 see:
 https://learn.microsoft.com/en-us/graph/api/resources/onedrive?view=graph-rest-1.0
 
-The supported applications are:
-
-- SharePoint
-
-## SharePoint
+## Usage
 
 To use the SharePoint filesystem, you need to create a new instance of the
 `msgraphfs.MSGDriveFS` class. You can also use the `msgd` protocol to lookup the
@@ -42,6 +38,28 @@ fs = fsspec.get_filesystem_class("msgd")(
 fs.ls("/")
 
 ```
+
+### Specific functionalities
+
+- `ls`, `info` : Both methods can take an `expand` additional argument. This
+  argument is a string that will be passed as the `expand` query parameter to
+  the microsoft graph API call used to get the file information. This can be
+  used to get additional information about the file, such as the `thumbnails` or
+  the `permissions` or ...
+
+- `checkin`, `checkout` : These methods are used to checkin/checkout a file.
+  They take the path of the file to checkin/checkout as argument. The `checking`
+  method also take an additional `comment`.
+
+- `get_versions` : This method returns the list of versions of a file. It takes
+  the path of the file as argument.
+
+In addition to the methods above, some methods can take an `item_id` additional
+arguments. This argument is the id of the drive item provided by the Microsoft
+Graph API. It can be used to avoid the need to make an additional API call to
+get the item id or to store a reference to a drive item independently of the
+path. (If the drive item is moved, the path will change but the item id will
+not).
 
 ## Installation
 
