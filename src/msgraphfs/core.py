@@ -782,6 +782,15 @@ class AbstractMSGraphFS(AsyncFileSystem):
     # Additional methods specific to the Microsoft Graph API
     ########################################################
 
+    async def _preview(self, path, item_id: str | None = None) -> str:
+        if not await self._isfile(path):
+            raise FileNotFoundError(f"File not found: {path}")
+        url = self._path_to_url(path, item_id=item_id, action="preview")
+        response = await self._msgraph_post(url)
+        return response.json().get("getUrl", [])
+
+    preview = sync_wrapper(_preview)
+
     async def _checkout(self, path: str, item_id: str | None = None):
         """Check out a file to prevent others from editing the document, and prevent
         your changes from being visible until the documented is checked in.
@@ -874,7 +883,7 @@ class MSGDriveFS(AbstractMSGraphFS):
         protos = (self.protocol,) if isinstance(self.protocol, str) else self.protocol
         has_proto = any(path.startswith(proto) for proto in protos)
         path = self._strip_protocol(path).rstrip("/")
-        if has_proto and path and not path.startswith("/"):
+        if path and not path.startswith("/"):
             path = "/" + path
         if path:
             path = f":{path}:"
