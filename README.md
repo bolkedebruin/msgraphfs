@@ -74,3 +74,31 @@ not).
 ```bash
 pip install msgraphfs
 ```
+
+### Get your drive id
+
+To get the drive id of your drive, you can use the microsoft graph explorer:
+https://developer.microsoft.com/en-us/graph/graph-explorer
+
+The first step is to get the site id of your site. You can do this by making a
+GET request to the following url:
+
+```bash
+https://graph.microsoft.com/v1.0/sites/{url}
+```
+
+where `{url}` is the url of your site without the protocol. For example, if your
+site is `https://mycompany.sharepoint.com/sites/mysite`, you should use
+`mycompany.sharepoint.com/sites/mysite` as the url.
+
+In the response, you will find the `id` of the site. 
+
+
+Now your can get the drive id of the drive you want to access. To do this, you
+can make a GET request to the following url:
+
+```bash
+  https://graph.microsoft.com/v1.0/sites/{site_id}/drives/
+```
+
+where `{site_id}` is the id of the site you got in the previous step.
