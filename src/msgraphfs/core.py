@@ -910,6 +910,26 @@ class MSGDriveFS(AbstractMSGraphFS):
 
     get_recycle_bin_items = sync_wrapper(_get_recycle_bin_items)
 
+    async def _get_drive_item_content(self, item_id, params=None) -> bytes:
+        """Get the item content.
+
+        Can set format in params to precise the output format (useful to convert docx to pdf)
+
+        Parameters:
+            item_id (str): The ID of the item to get the content of.
+            params (dict): Additional parameters to pass to the request.
+
+        Returns:
+            bytes: stream of content
+        """
+        params = params or {}
+        url = self._path_to_url("", item_id=item_id, action="content")
+        response = await self._msgraph_get(url, **params)
+        return response.content
+
+    get_drive_item_content = sync_wrapper(_get_drive_item_content)
+
+
 
 class AsyncStreamedFileMixin:
     """Mixin for streamed file-like objects using async iterators."""
