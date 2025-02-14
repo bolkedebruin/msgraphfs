@@ -54,6 +54,14 @@ fs.ls("/")
 - `get_versions` : This method returns the list of versions of a file. It takes
   the path of the file as argument.
 
+- `preview` : This method returns a url to a preview of the file. It takes the
+  path of the file as argument.
+
+- `get_content` : This method returns the content of a file. It takes the path
+  or the item_id of the file as argument. You can also pass the `format` argument
+  to specify the expected format of the content. This is useful for example to
+  convert a word document to a pdf.
+
 In addition to the methods above, some methods can take an `item_id` additional
 arguments. This argument is the id of the drive item provided by the Microsoft
 Graph API. It can be used to avoid the need to make an additional API call to
