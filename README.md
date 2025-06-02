@@ -190,3 +190,16 @@ Alternatively, you can set the environment variables `MSGRAPHFS_AUTH_CODE`, `MSG
 When the auth-code is provided and we need to get the access token (IOW when it's the first time you run the tests or when your refresh token is expired), the package will automatically get the access token and store it
 in a encrypted file into the keyring of your system. The call to the token endpoint requires a `redirect_uri` parameter. This one should match one of the redirect URIs you configured in your Azure AD application.
 By default, it is set to `http://localhost:8069/microsoft_account/authentication`, but you can change it by setting the environment variable `MSGRAPHFS_AUTH_REDIRECT_URI` or by passing the `--auth-redirect-uri` argument to pytest.
+
+### Pre-commit hooks
+
+To ensure code quality, this package uses pre-commit hooks. You can install them by running:
+
+```bash
+pre-commit install
+```
+This will set up the pre-commit hooks to run automatically before each commit. You can also run them manually by executing:
+
+```bash
+pre-commit run --all-files
+```
