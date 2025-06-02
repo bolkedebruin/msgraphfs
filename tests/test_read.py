@@ -89,11 +89,7 @@ def test_info(
     if expected_type == "file":
         # size for directories is not computed synchronously
         assert file_info["size"] == expected_size
-    assert (
-        file_info["name"] == fs.path + expected_name
-        if expected_name != "/"
-        else fs.path
-    )
+    assert file_info["name"] == expected_name if expected_name != "/" else fs.path
     if expected_type == "file":
         assert file_info["mimetype"] == expected_mimetype
 
@@ -132,11 +128,7 @@ async def test_async_info(
     if expected_type == "file":
         # size for directories is not computed synchronously
         assert file_info["size"] == expected_size
-    assert (
-        file_info["name"] == fs.path + expected_name
-        if expected_name != "/"
-        else fs.path
-    )
+    assert file_info["name"] == expected_name if expected_name != "/" else fs.path
     if expected_type == "file":
         assert file_info["mimetype"] == expected_mimetype
 

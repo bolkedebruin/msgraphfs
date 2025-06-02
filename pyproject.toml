@@ -26,6 +26,8 @@ test = [
     "pytest-cov",
     "pytest-asyncio",
     "coverage[toml]",
+    "keyring",
+    "requests",
 ]
 mypy = [
     "mypy>=1.4.1",

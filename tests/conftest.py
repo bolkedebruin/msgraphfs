@@ -4,11 +4,19 @@ import fsspec
 from fsspec.implementations.dirfs import DirFileSystem
 import pytest
 import pytest_asyncio
+import json
+import keyring
+import requests
 import os
+import warnings
 from msgraphfs import MSGDriveFS
 from functools import partial
 from contextlib import contextmanager, asynccontextmanager
 from . import content
+
+
+LOGIN_URL = "https://login.microsoftonline.com"
+SCOPES = ["offline_access", "openid", "Files.ReadWrite.All", "Sites.ReadWrite.All"]
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -27,67 +35,210 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--tenant-id", action="store", default=None, help="SharePoint drive ID"
     )
+    parser.addoption(
+        "--auth-code",
+        action="store",
+        default=None,
+        help="Authorization code for SharePoint authentication",
+    )
+    parser.addoption(
+        "--auth-redirect-url",
+        action="store",
+        default="http://localhost:8069",
+        help="The redirect url to use to get retrieve the auth code from Microsoft Graph API",
+    )
+
+
+def _get_tokens_for_auth_code(
+    client_id: str,
+    client_secret: str,
+    auth_code: str,
+    tenant_id: str,
+    auth_redirect_uri: str,
+) -> dict:
+    token_url = f"{LOGIN_URL}/{tenant_id}/oauth2/v2.0/token"
+    data = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "grant_type": "authorization_code",
+        "code": auth_code,
+        "redirect_uri": auth_redirect_uri,
+        "scope": " ".join(SCOPES),
+    }
+
+    response = requests.post(token_url, data=data)
+    if response.status_code != 200:
+        raise pytest.fail(f"Failed to get token: {response.text}")
+    tokens = response.json()
+    return tokens
+
+
+def _store_tokens_in_keyring(
+    client_id: str,
+    tenant_id: str,
+    tokens: dict,
+) -> None:
+    keyring_service = f"msgraph-token-{tenant_id}"
+    keyring_user = client_id
+    token_data = {
+        "access_token": tokens.get("access_token"),
+        "refresh_token": tokens.get("refresh_token"),
+        "expires_at": int(time.time()) + int(tokens.get("expires_in", 0)),
+    }
+    keyring.set_password(keyring_service, keyring_user, json.dumps(token_data))
+
+
+def _refresh_tokens(
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+    tenant_id: str,
+) -> dict:
+    token_url = f"{LOGIN_URL}/{tenant_id}/oauth2/v2.0/token"
+    data = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "scope": " ".join(SCOPES),
+    }
+    response = requests.post(token_url, data=data)
+    if response.status_code != 200:
+        warnings.warn(f"Failed to refresh token: {response.text}", stacklevel=2)
+        return {}
+    tokens = response.json()
+    _store_tokens_in_keyring(client_id, tenant_id, tokens)
+    return _load_tokens_from_keyring(
+        client_id=client_id,
+        tenant_id=tenant_id,
+    )
+
+
+def _load_tokens_from_keyring(
+    client_id: str,
+    tenant_id: str,
+) -> dict:
+    keyring_service = f"msgraph-token-{tenant_id}"
+    keyring_user = client_id
+    token_data = keyring.get_password(keyring_service, keyring_user)
+    if token_data:
+        return json.loads(token_data)
+    return {}
+
+
+def _get_and_check_tokens(
+    client_id: str,
+    client_secret: str,
+    tenant_id: str,
+) -> dict:
+    tokens = _load_tokens_from_keyring(client_id, tenant_id)
+    if not tokens:
+        return {}
+    if "access_token" not in tokens or "refresh_token" not in tokens:
+        warnings.warn("Tokens are missing access_token or refresh_token.", stacklevel=2)
+        return {}
+    if "expires_at" not in tokens or tokens["expires_at"] < time.time():
+        # Try to refresh the tokens
+        warnings.warn("Tokens are expired or missing expires_at.", stacklevel=2)
+        tokens = _refresh_tokens(
+            client_id=client_id,
+            client_secret=client_secret,
+            refresh_token=tokens.get("refresh_token"),
+            tenant_id=tenant_id,
+        )
+    return tokens
 
 
 def _create_fs(request, fs_type, asynchronous=False) -> fsspec.AbstractFileSystem:
     if fs_type == "msgdrive":
-        # Read configuration from command line arguments or environment variables
-        # TODO
-        client_id = request.config.getoption("--client-id") or os.getenv("CLIENT_ID")
-        client_secret = request.config.getoption("--client-secret") or os.getenv(
-            "CLIENT_SECRET"
+        client_id = request.config.getoption("--client-id") or os.getenv(
+            "MSGRAPHFS_CLIENT_ID"
         )
-        site_name = request.config.getoption("--site-name") or os.getenv("SITE_NAME")
-        drive_id = request.config.getoption("--drive-id") or os.getenv("DRIVE_ID")
-        tenant_id = request.config.getoption("--tenant-id") or os.getenv("TENANT_ID")
-        token = {
-            "access_token": None,
-            "refresh_token": None,
-            "expires_at": 10,
-        }
+        client_secret = request.config.getoption("--client-secret") or os.getenv(
+            "MSGRAPHFS_CLIENT_SECRET"
+        )
+        site_name = request.config.getoption("--site-name") or os.getenv(
+            "MSGRAPHFS_SITE_NAME"
+        )
+        drive_id = request.config.getoption("--drive-id") or os.getenv(
+            "MSGRAPHFS_DRIVE_ID"
+        )
+        tenant_id = request.config.getoption("--tenant-id") or os.getenv(
+            "MSGRAPHFS_TENANT_ID"
+        )
 
-        # TO BE REMOVED
-        try:
-            from . import private
-
-            tenant_id, site_name, drive_id, client_id, client_secret = (
-                private.get_oauth2_client_params()
+        if (
+            not client_id
+            or not client_secret
+            or not site_name
+            or not drive_id
+            or not tenant_id
+        ):
+            pytest.fail(
+                "Missing required configuration options: --client-id, --client-secret, "
+                "--site-name, --drive-id, --tenant-id or their environment variables."
             )
-        except ImportError:
-            pass
-        # for the token we read the content of the token.json file
-        # if it exists
-        try:
-            import json
-
-            with open("token.json") as f:
-                token = json.load(f)
-        except FileNotFoundError:
-            pass
-
-        # END TO BE REMOVED
+        auth_code = request.config.getoption("--auth-code") or os.getenv(
+            "MSGRAPHFS_AUTH_CODE"
+        )
+        auth_redirect_uri = request.config.getoption(
+            "--auth-redirect-uri"
+        ) or os.getenv(
+            "MSGRAPHFS_AUTH_REDIRECT_URI",
+            "http://localhost:8069/microsoft_account/authentication",
+        )
+        tokens = _get_and_check_tokens(
+            client_id=client_id,
+            client_secret=client_secret,
+            tenant_id=tenant_id,
+        )
+        if not tokens and not auth_code:
+            raise Exception(
+                "No valid tokens found in keyring. " "Please provide an auth code"
+            )
+        if not tokens:
+            tokens = _get_tokens_for_auth_code(
+                client_id=client_id,
+                client_secret=client_secret,
+                auth_code=auth_code,
+                tenant_id=tenant_id,
+                auth_redirect_uri=auth_redirect_uri,
+            )
+            _store_tokens_in_keyring(
+                client_id=client_id,
+                tenant_id=tenant_id,
+                tokens=tokens,
+            )
+            # Reload tokens from keyring after storing
+            # Since some attributes like expires_at are added
+            # after the initial request
+            tokens = _load_tokens_from_keyring(
+                client_id=client_id,
+                tenant_id=tenant_id,
+            )
 
         oauth2_client_params = {
-            "scope": "offline_access openid Files.ReadWrite.All Sites.ReadWrite.All",
+            "scope": " ".join(SCOPES),
             "client_id": client_id,
             "client_secret": client_secret,
-            "token": token,
-            "token_endpoint": f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
+            "token": tokens,
+            "token_endpoint": f"{LOGIN_URL}/{tenant_id}/oauth2/v2.0/token",
             "timeout": 10.0,
         }
 
-        def refresh_token_response(resp, initial_token):
-            token = resp.json()
-            token["expires_at"] = int(token["expires_in"]) + int(time.time())
-            # only keep the access token, the refresh token and the expire at time
-            token = {
-                k: v
-                for k, v in token.items()
-                if k in ["access_token", "refresh_token", "expires_at"]
-            }
-            with open("token.json", "w") as f:
-                json.dump(token, f, indent=4)
-            initial_token.update(token)
+        def refresh_tokens_response(resp, initial_token):
+            tokens = resp.json()
+            _store_tokens_in_keyring(
+                client_id=client_id,
+                tenant_id=tenant_id,
+                tokens=tokens,
+            )
+            initial_token.update(
+                _load_tokens_from_keyring(
+                    client_id=client_id,
+                    tenant_id=tenant_id,
+                )
+            )
             return resp
 
         # Initialize SharePointFS with the configuration
@@ -104,7 +255,7 @@ def _create_fs(request, fs_type, asynchronous=False) -> fsspec.AbstractFileSyste
 
         sp_fs.client.register_compliance_hook(
             "refresh_token_response",
-            partial(refresh_token_response, initial_token=token),
+            partial(refresh_tokens_response, initial_token=tokens),
         )
 
         # Yield the initialized object

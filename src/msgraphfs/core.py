@@ -898,8 +898,6 @@ class MSGDriveFS(AbstractMSGraphFS):
 
     def _path_to_url(self, path, item_id=None, action=None) -> str:
         action = action and f"/{action}" if action else ""
-        protos = (self.protocol,) if isinstance(self.protocol, str) else self.protocol
-        has_proto = any(path.startswith(proto) for proto in protos)
         path = self._strip_protocol(path).rstrip("/")
         if path and not path.startswith("/"):
             path = "/" + path
