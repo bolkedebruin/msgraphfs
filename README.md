@@ -1,7 +1,6 @@
 # MSGraphFS
 
-This python package is a fsspec based filesystem-like interface to drives exposed
-through the Microsoft graph API (OneDrive, Sharepoint, etc).
+This python package is a [fsspec](https://filesystem-spec.readthedocs.io/) based filesystem-like interface to drives exposed through the Microsoft graph API (OneDrive, Sharepoint, etc).
 
 see:
 https://learn.microsoft.com/en-us/graph/api/resources/onedrive?view=graph-rest-1.0
