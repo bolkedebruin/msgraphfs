@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
@@ -11,6 +11,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
+
 ]
 dynamic = ["version", "description"]
 dependencies = [
@@ -31,7 +32,6 @@ test = [
 ]
 release = [
     "towncrier",
-    "bumpversion",
 ]
 
 [project.entry-points."fsspec.specs"]
@@ -41,7 +41,7 @@ msgd="msgraphfs.MSGDriveFS"
 Source = "https://github.com/acsone/msgraphfs"
 
 [tool.hatch.version]
-path="src/msgraphfs/version.py"
+source = "vcs"
 
 [tool.hatch.build]
 include = ["src/msgraphfs"]
