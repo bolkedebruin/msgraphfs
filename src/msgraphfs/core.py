@@ -1,26 +1,23 @@
-import re
 import asyncio
 import datetime
-import mimetypes
-import httpx
 import logging
+import mimetypes
+import re
 import weakref
+
+import httpx
+from authlib.integrations.httpx_client import AsyncOAuth2Client
 from fsspec.asyn import (
+    AbstractAsyncStreamedFile,
+    AbstractBufferedFile,
     AsyncFileSystem,
     FSTimeoutError,
     sync,
     sync_wrapper,
-    AbstractBufferedFile,
-    AbstractAsyncStreamedFile,
 )
-
 from fsspec.utils import tokenize
-from authlib.integrations.httpx_client import AsyncOAuth2Client
-
-
 from httpx import HTTPStatusError, Response
 from httpx._types import URLTypes
-
 
 HTTPX_RETRYABLE_ERRORS = (
     asyncio.TimeoutError,
@@ -1146,9 +1143,10 @@ class AsyncStreamedFileMixin:
         # If the file to be uploaded is larger than the block size, then we need to
         # create an upload session to upload the file in chunks.
         self._chunk_start_pos = 0
-        self._upload_session_url, self._upload_expiration_dt = (
-            await self._create_upload_session()
-        )
+        (
+            self._upload_session_url,
+            self._upload_expiration_dt,
+        ) = await self._create_upload_session()
 
     async def _fetch_range(self, start, end) -> bytes:
         """Get the specified set of bytes from remote."""

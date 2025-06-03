@@ -1,7 +1,9 @@
-import io
-import pytest
 import datetime
+import io
 from itertools import chain
+
+import pytest
+
 from . import content
 
 

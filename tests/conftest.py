@@ -1,19 +1,21 @@
+import json
+import os
 import time
 import uuid
+import warnings
+from contextlib import asynccontextmanager, contextmanager
+from functools import partial
+
 import fsspec
-from fsspec.implementations.dirfs import DirFileSystem
+import keyring
 import pytest
 import pytest_asyncio
-import json
-import keyring
 import requests
-import os
-import warnings
-from msgraphfs import MSGDriveFS
-from functools import partial
-from contextlib import contextmanager, asynccontextmanager
-from . import content
+from fsspec.implementations.dirfs import DirFileSystem
 
+from msgraphfs import MSGDriveFS
+
+from . import content
 
 LOGIN_URL = "https://login.microsoftonline.com"
 SCOPES = ["offline_access", "openid", "Files.ReadWrite.All", "Sites.ReadWrite.All"]
@@ -194,7 +196,7 @@ def _create_fs(request, fs_type, asynchronous=False) -> fsspec.AbstractFileSyste
         )
         if not tokens and not auth_code:
             raise Exception(
-                "No valid tokens found in keyring. " "Please provide an auth code"
+                "No valid tokens found in keyring. Please provide an auth code"
             )
         if not tokens:
             tokens = _get_tokens_for_auth_code(
@@ -341,7 +343,6 @@ def _temp_dir(storagefs):
     temp_dir_name = f"/{str(uuid.uuid4())}"
     storagefs.mkdir(temp_dir_name)
     try:
-
         yield temp_dir_name
     finally:
         # cleanup
@@ -354,7 +355,6 @@ async def _a_temp_dir(storagefs):
     temp_dir_name = f"/{str(uuid.uuid4())}"
     await storagefs._mkdir(temp_dir_name)
     try:
-
         yield temp_dir_name
     finally:
         # cleanup
