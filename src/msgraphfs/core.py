@@ -1,26 +1,23 @@
-import re
 import asyncio
 import datetime
-import mimetypes
-import httpx
 import logging
+import mimetypes
+import re
 import weakref
+
+import httpx
+from authlib.integrations.httpx_client import AsyncOAuth2Client
 from fsspec.asyn import (
+    AbstractAsyncStreamedFile,
+    AbstractBufferedFile,
     AsyncFileSystem,
     FSTimeoutError,
     sync,
     sync_wrapper,
-    AbstractBufferedFile,
-    AbstractAsyncStreamedFile,
 )
-
 from fsspec.utils import tokenize
-from authlib.integrations.httpx_client import AsyncOAuth2Client
-
-
 from httpx import HTTPStatusError, Response
 from httpx._types import URLTypes
-
 
 HTTPX_RETRYABLE_ERRORS = (
     asyncio.TimeoutError,

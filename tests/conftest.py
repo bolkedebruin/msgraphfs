@@ -1,19 +1,21 @@
+import json
+import os
 import time
 import uuid
+import warnings
+from contextlib import asynccontextmanager, contextmanager
+from functools import partial
+
 import fsspec
-from fsspec.implementations.dirfs import DirFileSystem
+import keyring
 import pytest
 import pytest_asyncio
-import json
-import keyring
 import requests
-import os
-import warnings
-from msgraphfs import MSGDriveFS
-from functools import partial
-from contextlib import contextmanager, asynccontextmanager
-from . import content
+from fsspec.implementations.dirfs import DirFileSystem
 
+from msgraphfs import MSGDriveFS
+
+from . import content
 
 LOGIN_URL = "https://login.microsoftonline.com"
 SCOPES = ["offline_access", "openid", "Files.ReadWrite.All", "Sites.ReadWrite.All"]

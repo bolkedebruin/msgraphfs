@@ -1,8 +1,9 @@
-import uuid
 import datetime
 import io
-import pytest
+import uuid
 from array import array
+
+import pytest
 
 from . import content
 
