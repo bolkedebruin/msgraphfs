@@ -1146,9 +1146,10 @@ class AsyncStreamedFileMixin:
         # If the file to be uploaded is larger than the block size, then we need to
         # create an upload session to upload the file in chunks.
         self._chunk_start_pos = 0
-        self._upload_session_url, self._upload_expiration_dt = (
-            await self._create_upload_session()
-        )
+        (
+            self._upload_session_url,
+            self._upload_expiration_dt,
+        ) = await self._create_upload_session()
 
     async def _fetch_range(self, start, end) -> bytes:
         """Get the specified set of bytes from remote."""

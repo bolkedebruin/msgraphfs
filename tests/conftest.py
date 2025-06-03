@@ -194,7 +194,7 @@ def _create_fs(request, fs_type, asynchronous=False) -> fsspec.AbstractFileSyste
         )
         if not tokens and not auth_code:
             raise Exception(
-                "No valid tokens found in keyring. " "Please provide an auth code"
+                "No valid tokens found in keyring. Please provide an auth code"
             )
         if not tokens:
             tokens = _get_tokens_for_auth_code(
@@ -341,7 +341,6 @@ def _temp_dir(storagefs):
     temp_dir_name = f"/{str(uuid.uuid4())}"
     storagefs.mkdir(temp_dir_name)
     try:
-
         yield temp_dir_name
     finally:
         # cleanup
@@ -354,7 +353,6 @@ async def _a_temp_dir(storagefs):
     temp_dir_name = f"/{str(uuid.uuid4())}"
     await storagefs._mkdir(temp_dir_name)
     try:
-
         yield temp_dir_name
     finally:
         # cleanup
