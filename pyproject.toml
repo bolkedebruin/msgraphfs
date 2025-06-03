@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
@@ -11,6 +11,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
+
 ]
 dynamic = ["version", "description"]
 dependencies = [
@@ -29,12 +30,8 @@ test = [
     "keyring",
     "requests",
 ]
-mypy = [
-    "mypy>=1.4.1",
-]
 release = [
     "towncrier",
-    "bumpversion",
 ]
 
 [project.entry-points."fsspec.specs"]
@@ -44,8 +41,7 @@ msgd="msgraphfs.MSGDriveFS"
 Source = "https://github.com/acsone/msgraphfs"
 
 [tool.hatch.version]
-path="src/msgraphfs/version.py"
-
+source = "vcs"
 
 [tool.hatch.build]
 include = ["src/msgraphfs"]
@@ -86,12 +82,6 @@ ignore = [
 
 [tool.ruff.per-file-ignores]
 "__init__.py" = ["F401"]
-
-[[tool.mypy.overrides]]
-implicit_reexport = true
-
-[[tool.mypy.overrides]]
-implicit_reexport = true
 
 [tool.towncrier]
 name = "Sharepoint fsspec adapter"
