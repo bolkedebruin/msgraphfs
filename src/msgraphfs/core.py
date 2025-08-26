@@ -880,6 +880,52 @@ class AbstractMSGraphFS(AsyncFileSystem):
 
     get_versions = sync_wrapper(_get_versions)
 
+    async def _get_sharepoint_ids(self, path: str, item_id: str | None = None) -> dict:
+        """Get the SharePoint IDs of a file or directory on a SharePoint site.
+
+        Parameters
+        ----------
+        path : str
+            Path of the file or directory to get the SharePoint IDs of
+        item_id: str
+            If given, the item_id will be used instead of the path to get
+            the SharePoint IDs of the file or directory.
+        """
+        url = self._path_to_url(path, item_id=item_id)
+        response = await self._msgraph_get(url, params={"select": "sharepointIds"})
+        return response.json().get("sharepointIds", {})
+
+    get_sharepoint_ids = sync_wrapper(_get_sharepoint_ids)
+
+    async def _set_properties(
+        self, path: str, properties: dict, item_id: str | None = None
+    ):
+        """Set the properties of a file or directory on a SharePoint site.
+
+        Parameters
+        ----------
+        path : str
+            Path of the file or directory to set the properties of
+        properties : dict
+            Dictionary of properties to set. The keys are the property names and the values are the property values.
+        item_id: str
+            If given, the item_id will be used instead of the path to set
+            the properties of the file or directory.
+        """
+        sharepoint_ids = await self._get_sharepoint_ids(path, item_id=item_id)
+        if not sharepoint_ids:
+            raise ValueError(
+                f"Cannot set properties for the given path: {path}: not a SharePoint item"
+            )
+        sharepoint_item_id = sharepoint_ids.get("listItemId")
+        site_id = sharepoint_ids.get("siteId")
+        list_id = sharepoint_ids.get("listId")
+        url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{list_id}/items/{sharepoint_item_id}/fields"
+        await self._msgraph_patch(url, json=properties)
+        self.invalidate_cache(path)
+
+    set_properties = sync_wrapper(_set_properties)
+
 
 class MSGDriveFS(AbstractMSGraphFS):
     """A filesystem that represents a SharePoint site dirve as a filesystem.

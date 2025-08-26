@@ -336,6 +336,12 @@ class MsGraphTempFS(DirFileSystem):
     def get_versions(self, path):
         return self.fs.get_versions(self._join(path))
 
+    async def _set_properties(self, path, properties, item_id=None):
+        return await self.fs._set_properties(self._join(path), properties, item_id)
+
+    def set_properties(self, path, properties, item_id=None):
+        return self.fs.set_properties(self._join(path), properties, item_id)
+
 
 @contextmanager
 def _temp_dir(storagefs):

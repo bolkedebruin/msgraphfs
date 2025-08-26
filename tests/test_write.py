@@ -646,3 +646,24 @@ def test_lock_unlock(temp_fs):
     fs.checkin(path, comment="my update comment")
     versions = fs.get_versions(path)
     assert len(versions) == 2
+
+
+def test_set_properties(temp_fs):
+    fs = temp_fs
+    path = "/test.csv"
+    fs.touch(path)
+    properties = {"_ExtendedDescription": "My Description"}
+    fs.set_properties(path, properties)
+    item = fs.info(path)
+    assert item["item_info"].get("description") == "My Description"
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_async_set_properties(temp_afs):
+    fs = temp_afs
+    path = "/test.csv"
+    await fs._touch(path)
+    properties = {"_ExtendedDescription": "My other Description"}
+    await fs._set_properties(path, properties)
+    item = await fs._info(path)
+    assert item["item_info"].get("description") == "My other Description"
