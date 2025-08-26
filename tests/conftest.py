@@ -44,7 +44,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Authorization code for SharePoint authentication",
     )
     parser.addoption(
-        "--auth-redirect-url",
+        "--auth-redirect-uri",
         action="store",
         default="http://localhost:8069",
         help="The redirect url to use to get retrieve the auth code from Microsoft Graph API",

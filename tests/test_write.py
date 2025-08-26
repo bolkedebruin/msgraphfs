@@ -531,9 +531,7 @@ def test_created(temp_fs):
     assert isinstance(created, datetime.datetime)
 
 
-pytest.mark.asyncio(loop_scope="function")
-
-
+@pytest.mark.asyncio(loop_scope="function")
 async def test_async_created(temp_afs):
     fs = temp_afs
     path = "/test.csv"
