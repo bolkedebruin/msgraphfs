@@ -181,10 +181,14 @@ class AbstractMSGraphFS(AsyncFileSystem):
             "type": _type,
             "item_info": drive_item_info,
             "time": datetime.datetime.fromisoformat(
-                drive_item_info.get("createdDateTime", "1970-01-01T00:00:00Z")
+                drive_item_info.get("createdDateTime", "1970-01-01T00:00:00Z").replace(
+                    "Z", "+00:00"
+                )
             ),
             "mtime": datetime.datetime.fromisoformat(
-                drive_item_info.get("lastModifiedDateTime", "1970-01-01T00:00:00Z")
+                drive_item_info.get(
+                    "lastModifiedDateTime", "1970-01-01T00:00:00Z"
+                ).replace("Z", "+00:00")
             ),
             "id": drive_item_info.get("id"),
         }
