@@ -973,6 +973,11 @@ class AsyncStreamedFileMixin:
             self._item_id = await self.fs._get_item_id(self.path)
         return self._item_id
 
+    async def _get_item_id(self):
+        return await self.item_id
+
+    get_item_id = sync_wrapper(_get_item_id)
+
     async def _create_upload_session(self) -> tuple[str, datetime.datetime]:
         """Create a new upload session for the file.
 

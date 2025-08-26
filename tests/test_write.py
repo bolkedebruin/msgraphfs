@@ -199,6 +199,41 @@ def test_copy(temp_fs):
     assert fs.cat("/file1.txt") == fs.cat("/file2.txt")
 
 
+def test_get_item_id_from_file_handler(temp_fs):
+    fs = temp_fs
+    with fs.open("/file1.txt", "wb") as f:
+        item_id = f.get_item_id()
+        assert item_id is None
+        f.write(b"hello world")
+    # at the end of the with block the file is closed and item_id should be available
+    item_id = f.get_item_id()
+    assert item_id is not None
+    assert isinstance(item_id, str)
+
+    # on an already existing file the item_id should be available right away
+    with fs.open("/file1.txt", "wb") as f:
+        item_id = f.get_item_id()
+        assert item_id is not None
+        assert isinstance(item_id, str)
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_async_get_item_id_from_file_handler(temp_afs):
+    fs = temp_afs
+    async with await fs._open_async("/file1.txt", "wb") as f:
+        item_id = await f._get_item_id()
+        assert item_id is None
+        await f.write(b"hello world")
+    item_id = await f._get_item_id()
+    assert item_id is not None
+    assert isinstance(item_id, str)
+
+    async with await fs._open_async("/file1.txt", "wb") as f:
+        item_id = await f._get_item_id()
+        assert item_id is not None
+        assert isinstance(item_id, str)
+
+
 @pytest.mark.asyncio(loop_scope="function")
 async def test_async_copy(temp_afs):
     fs = temp_afs
