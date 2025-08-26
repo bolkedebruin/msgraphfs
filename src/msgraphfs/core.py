@@ -450,7 +450,12 @@ class AbstractMSGraphFS(AsyncFileSystem):
         if expand:
             params = {"expand": expand}
         response = await self._msgraph_get(url, params=params)
-        items = response.json().get("value", [])
+        result = response.json()
+        items = result.get("value", [])
+        while "@odata.nextLink" in result:
+            response = await self._msgraph_get(result["@odata.nextLink"])
+            result = response.json()
+            items.extend(result.get("value", []))
         if not items:
             # maybe the path is a file
             try:
@@ -865,7 +870,13 @@ class AbstractMSGraphFS(AsyncFileSystem):
             raise FileNotFoundError(f"File not found: {path}")
         url = self._path_to_url(path, item_id=item_id, action="versions")
         response = await self._msgraph_get(url)
-        return response.json().get("value", [])
+        result = response.json()
+        items = result.get("value", [])
+        while "@odata.nextLink" in result:
+            response = await self._msgraph_get(result["@odata.nextLink"])
+            result = response.json()
+            items.extend(result.get("value", []))
+        return items
 
     get_versions = sync_wrapper(_get_versions)
 
