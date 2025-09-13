@@ -1,1 +1,1 @@
-from .core import MSGDriveFS, MSGraphBuffredFile, MSGrpahStreamedFile
+from .core import MSGDriveFS, MSGraphBufferedFile, MSGraphStreamedFile

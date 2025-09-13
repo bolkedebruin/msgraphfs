@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import logging
 import mimetypes
+import os
 import re
 import weakref
 
@@ -698,7 +699,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             raise FileNotFoundError(f"File not found: {path}")
         if "a" in mode and not size:
             size = self.size(path)
-        return MSGraphBuffredFile(
+        return MSGraphBufferedFile(
             fs=self,
             path=path,
             mode=mode,
@@ -728,7 +729,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             # size is provided, the info method will not be called from the constructor
             info = await self._info(path)
             size = info["size"]
-        return MSGrpahStreamedFile(
+        return MSGraphStreamedFile(
             self, path, mode, size=size, item_id=item_id, **kwargs
         )
 
@@ -928,33 +929,130 @@ class AbstractMSGraphFS(AsyncFileSystem):
 
 
 class MSGDriveFS(AbstractMSGraphFS):
-    """A filesystem that represents a SharePoint site dirve as a filesystem.
+    """A filesystem that represents a SharePoint site drive as a filesystem.
 
-    parameters:
-    drive_id (str): The ID of the SharePoint drive.
-    site_name (str): The name of the SharePoint site (optional, only used to list the recycle bin items).
-    use_recycle_bin: bool (=False)
-        If True, when a file is deleted, it will be moved to the recycle bin.
-        If False, the file will be permanently deleted. Default is False.
-    oauth2_client_params (dict): Parameters for the OAuth2 client to use for
-        authentication. see https://docs.authlib.org/en/latest/client/api.html#authlib.integrations.httpx_client.AsyncOAuth2Client
+    Parameters:
+    -----------
+    drive_id : str, optional
+        The ID of the SharePoint drive. If not provided, will attempt to discover from site.
+    client_id : str, optional
+        OAuth2 client ID. Can also be set via MSGRAPHFS_CLIENT_ID environment variable.
+    tenant_id : str, optional
+        OAuth2 tenant ID. Can also be set via MSGRAPHFS_TENANT_ID environment variable.
+    client_secret : str, optional
+        OAuth2 client secret. Can also be set via MSGRAPHFS_CLIENT_SECRET environment variable.
+    site_name : str, optional
+        The name of the SharePoint site (optional, used for recycle bin and auto drive detection).
+    oauth2_client_params : dict, optional
+        Parameters for the OAuth2 client. If not provided, will be built from client_id, tenant_id, client_secret.
+    use_recycle_bin : bool, optional
+        If True, deleted files are moved to recycle bin. Default is False.
+    **kwargs : dict
+        Additional arguments passed to the parent class.
     """
 
     protocol = ["msgd"]
 
+    # Default OAuth2 scopes for Microsoft Graph API (client credentials flow)
+    DEFAULT_SCOPES = ["https://graph.microsoft.com/.default"]
+
     def __init__(
         self,
-        drive_id: str,
-        oauth2_client_params: dict,
+        drive_id: str | None = None,
+        client_id: str | None = None,
+        tenant_id: str | None = None,
+        client_secret: str | None = None,
         site_name: str | None = None,
+        oauth2_client_params: dict | None = None,
         **kwargs,
     ):
+        # Get OAuth2 credentials from parameters or environment variables
+        self.client_id = client_id or os.getenv("MSGRAPHFS_CLIENT_ID")
+        self.tenant_id = tenant_id or os.getenv("MSGRAPHFS_TENANT_ID")
+        self.client_secret = client_secret or os.getenv("MSGRAPHFS_CLIENT_SECRET")
+
+        # Build oauth2_client_params if not provided
+        if oauth2_client_params is None:
+            if not all([self.client_id, self.tenant_id, self.client_secret]):
+                raise ValueError(
+                    "Either oauth2_client_params must be provided, or all of "
+                    "client_id, tenant_id, and client_secret must be provided "
+                    "(either as parameters or environment variables MSGRAPHFS_CLIENT_ID, "
+                    "MSGRAPHFS_TENANT_ID, MSGRAPHFS_CLIENT_SECRET)"
+                )
+
+            # Build OAuth2 client parameters with proper configuration
+            oauth2_client_params = {
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+                "token_endpoint": f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token",
+                "scope": " ".join(self.DEFAULT_SCOPES),
+                "grant_type": "client_credentials",
+            }
+        else:
+            # Extract credentials from provided params for later use
+            self.client_id = oauth2_client_params.get("client_id")
+            self.tenant_id = self._extract_tenant_from_token_endpoint(
+                oauth2_client_params.get("token_endpoint", "")
+            )
+            self.client_secret = oauth2_client_params.get("client_secret")
+
         super().__init__(oauth2_client_params=oauth2_client_params, **kwargs)
-        self.site_name: str = site_name
-        self.drive_id: str = drive_id
-        self.drive_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}"
+
+        self.site_name = site_name
+        self.drive_id = drive_id
+
+        # We'll set the drive_url later if drive_id is determined
+        if self.drive_id:
+            self.drive_url = f"https://graph.microsoft.com/v1.0/drives/{self.drive_id}"
+        else:
+            self.drive_url = None
+
+    def _extract_tenant_from_token_endpoint(self, token_endpoint: str) -> str | None:
+        """Extract tenant_id from token endpoint URL."""
+        import re
+
+        match = re.search(r"/([a-f0-9-]+)/oauth2", token_endpoint)
+        return match.group(1) if match else None
+
+    async def _ensure_drive_id(self) -> str:
+        """Ensure drive_id is available, discovering it if necessary."""
+        if self.drive_id:
+            return self.drive_id
+
+        if not self.site_name:
+            # Try to get the default drive for the current user
+            try:
+                response = await self._msgraph_get(
+                    "https://graph.microsoft.com/v1.0/me/drive"
+                )
+                drive_info = response.json()
+                self.drive_id = drive_info["id"]
+                self.drive_url = (
+                    f"https://graph.microsoft.com/v1.0/drives/{self.drive_id}"
+                )
+                return self.drive_id
+            except Exception as e:
+                raise ValueError(
+                    "Unable to discover drive_id. Please provide either drive_id or site_name."
+                ) from e
+        else:
+            # Get site_id from site_name, then get default drive
+            site_id = await self._get_site_id()
+            response = await self._msgraph_get(
+                f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive"
+            )
+            drive_info = response.json()
+            self.drive_id = drive_info["id"]
+            self.drive_url = f"https://graph.microsoft.com/v1.0/drives/{self.drive_id}"
+            return self.drive_id
 
     def _path_to_url(self, path, item_id=None, action=None) -> str:
+        if not self.drive_url:
+            raise ValueError(
+                "drive_id not available. Either provide drive_id in constructor "
+                "or call _ensure_drive_id() first."
+            )
         action = action and f"/{action}" if action else ""
         path = self._strip_protocol(path).rstrip("/")
         if path and not path.startswith("/"):
@@ -966,12 +1064,26 @@ class MSGDriveFS(AbstractMSGraphFS):
 
         return f"{self.drive_url}/root{path}{action}"
 
+    async def _path_to_url_async(self, path, item_id=None, action=None) -> str:
+        """Async version of _path_to_url that ensures drive_id is available."""
+        if not self.drive_url:
+            await self._ensure_drive_id()
+        return self._path_to_url(path, item_id, action)
+
     async def _get_site_id(self) -> str:
-        url = f"https://graph.microsoft.com/v1.0/sites?search=¼{self.site_name}"
+        if not self.site_name:
+            raise ValueError("site_name is required to get site_id")
+        url = f"https://graph.microsoft.com/v1.0/sites?search={self.site_name}"
         response = await self._msgraph_get(url)
-        return response.json()["value"][0]["id"]
+        sites = response.json().get("value", [])
+        if not sites:
+            raise ValueError(f"No site found with name '{self.site_name}'")
+        return sites[0]["id"]
 
     async def _get_item_reference(self, path: str, item_id: str | None = None) -> dict:
+        # Ensure drive_id is available
+        if not self.drive_id:
+            await self._ensure_drive_id()
         item_reference = await super()._get_item_reference(path, item_id=item_id)
         return {
             "driveId": self.drive_id,
@@ -992,6 +1104,23 @@ class MSGDriveFS(AbstractMSGraphFS):
         return response.json().get("value", [])
 
     get_recycle_bin_items = sync_wrapper(_get_recycle_bin_items)
+    ensure_drive_id = sync_wrapper(_ensure_drive_id)
+
+    # Override some methods to ensure drive_id is available
+    async def _ls(self, *args, **kwargs):
+        if not self.drive_url:
+            await self._ensure_drive_id()
+        return await super()._ls(*args, **kwargs)
+
+    async def _info(self, *args, **kwargs):
+        if not self.drive_url:
+            await self._ensure_drive_id()
+        return await super()._info(*args, **kwargs)
+
+    async def _exists(self, *args, **kwargs):
+        if not self.drive_url:
+            await self._ensure_drive_id()
+        return await super()._exists(*args, **kwargs)
 
 
 class AsyncStreamedFileMixin:
@@ -1224,7 +1353,7 @@ class AsyncStreamedFileMixin:
         return self.fs.loop
 
 
-class MSGraphBuffredFile(AsyncStreamedFileMixin, AbstractBufferedFile):
+class MSGraphBufferedFile(AsyncStreamedFileMixin, AbstractBufferedFile):
     """A file-like object representing a file in a SharePoint drive.
 
     Parameters
@@ -1311,7 +1440,7 @@ class MSGraphBuffredFile(AsyncStreamedFileMixin, AbstractBufferedFile):
     _fetch_range = sync_wrapper(AsyncStreamedFileMixin._fetch_range)
 
 
-class MSGrpahStreamedFile(AsyncStreamedFileMixin, AbstractAsyncStreamedFile):
+class MSGraphStreamedFile(AsyncStreamedFileMixin, AbstractAsyncStreamedFile):
     """A file-like object representing a file in a SharePoint drive.
 
     Parameters
