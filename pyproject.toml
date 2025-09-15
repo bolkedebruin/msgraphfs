@@ -3,7 +3,7 @@ requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
-name = "msgraphfs"
+name = "msgraphfs-dev"
 authors = [{name = "Laurent Mignon", email = "laurent.mignon@acsone.eu"}]
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -38,7 +38,7 @@ release = [
 msgd="msgraphfs.MSGDriveFS"
 
 [project.urls]
-Source = "https://github.com/acsone/msgraphfs"
+Source = "https://github.com/bolkedebruin/msgraphfs"
 
 [tool.hatch.version]
 source = "vcs"
@@ -82,7 +82,7 @@ ignore = [
 
 [tool.towncrier]
 name = "Sharepoint fsspec adapter"
-package = "msgraphfs"
+package = "msgraphfs-dev"
 package_dir = "src"
 filename = "HISTORY.md"
 directory = "news"
