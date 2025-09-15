@@ -111,14 +111,20 @@ class AbstractMSGraphFS(AsyncFileSystem):
     def __init__(
         self,
         oauth2_client_params: dict,
+        asynchronous: bool = False,
+        loop=None,
         **kwargs,
     ):
+        from fsspec.asyn import get_loop
+
         super_kwargs = kwargs.copy()
         super_kwargs.pop("use_listings_cache", None)
         super_kwargs.pop("listings_expiry_time", None)
         super_kwargs.pop("max_paths", None)
         # passed to fsspec superclass... we don't support directory caching
-        super().__init__(**super_kwargs)
+        super().__init__(
+            asynchronous=asynchronous, loop=loop or get_loop(), **super_kwargs
+        )
 
         self.client: AsyncOAuth2Client = AsyncOAuth2Client(
             **oauth2_client_params,
@@ -136,6 +142,26 @@ class AbstractMSGraphFS(AsyncFileSystem):
         except Exception:
             # Ignore all cleanup errors in destructor
             pass
+
+    @property
+    def loop(self):
+        """Fork-safe loop property that reinitializes the loop after fork detection."""
+        if self._pid != os.getpid():
+            # Fork detected - reinitialize the loop for the new process
+            self._pid = os.getpid()
+            if not self.asynchronous:
+                from fsspec.asyn import get_loop
+
+                self._loop = get_loop()
+                # Also need to set the event loop for the new process
+                import asyncio
+
+                try:
+                    asyncio.set_event_loop(self._loop)
+                except RuntimeError:
+                    # Event loop might already be set
+                    pass
+        return self._loop
 
     @staticmethod
     def close_http_session(
@@ -1007,6 +1033,8 @@ class MSGDriveFS(AbstractMSGraphFS):
         site_name: str | None = None,
         drive_name: str | None = None,
         oauth2_client_params: dict | None = None,
+        asynchronous: bool = False,
+        loop=None,
         **kwargs,
     ):
         # Get OAuth2 credentials from parameters or environment variables
@@ -1040,7 +1068,12 @@ class MSGDriveFS(AbstractMSGraphFS):
             )
             self.client_secret = oauth2_client_params.get("client_secret")
 
-        super().__init__(oauth2_client_params=oauth2_client_params, **kwargs)
+        super().__init__(
+            oauth2_client_params=oauth2_client_params,
+            asynchronous=asynchronous,
+            loop=loop,
+            **kwargs,
+        )
 
         self.site_name = site_name
         self.drive_name = drive_name
