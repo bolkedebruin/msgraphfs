@@ -397,10 +397,12 @@ class AbstractMSGraphFS(AsyncFileSystem):
         item_id = item_id or await self._get_item_id(path, throw_on_missing=True)
         use_recycle_bin = kwargs.get("use_recycle_bin", self.use_recycle_bin)
         if use_recycle_bin:
-            url = self._path_to_url(path, item_id=item_id)
+            url = await self._path_to_url_async(path, item_id=item_id)
             await self._msgraph_delete(url)
         else:
-            url = self._path_to_url(path, item_id=item_id, action="permanentDelete")
+            url = await self._path_to_url_async(
+                path, item_id=item_id, action="permanentDelete"
+            )
             await self._msgraph_post(url)
         self.invalidate_cache(path)
 
@@ -439,7 +441,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             you can pass "thumbnails" as the value of the expand parameter.
         """
 
-        url = self._path_to_url(path, item_id=item_id)
+        url = await self._path_to_url_async(path, item_id=item_id)
         params = {}
         if expand:
             params = {"expand": expand}
@@ -475,7 +477,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         kwargs: may have additional backend-specific options, such as version
             information
         """
-        url = self._path_to_url(path, item_id=item_id, action="children")
+        url = await self._path_to_url_async(path, item_id=item_id, action="children")
         params = None
         if expand and not detail:
             raise ValueError(
@@ -513,7 +515,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         item_id: str | None = None,
         **kwargs,
     ):
-        url = self._path_to_url(path, item_id=item_id, action="content")
+        url = await self._path_to_url_async(path, item_id=item_id, action="content")
         headers = kwargs.get("headers", {})
         if start is not None or end is not None:
             range = await self._process_limits(path, start, end)
@@ -586,7 +588,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         )
 
     async def _isfile(self, path: str) -> bool:
-        url = self._path_to_url(path)
+        url = await self._path_to_url_async(path)
         try:
             response = await self._msgraph_get(url, params={"select": "file"})
         except FileNotFoundError:
@@ -594,7 +596,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         return response.json().get("file") is not None
 
     async def _isdir(self, path: str) -> bool:
-        url = self._path_to_url(path)
+        url = await self._path_to_url_async(path)
         try:
             response = await self._msgraph_get(url, params={"select": "folder"})
         except FileNotFoundError:
@@ -602,7 +604,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         return response.json().get("folder") is not None
 
     async def _size(self, path: str) -> int:
-        url = self._path_to_url(path)
+        url = await self._path_to_url_async(path)
         response = await self._msgraph_get(url, params={"select": "size"})
         return response.json().get("size", 0)
 
@@ -615,7 +617,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         if not parent_id:
             await self._mkdir(parent, create_parents=create_parents)
             parent_id = await self._get_item_id(parent)
-        url = self._path_to_url(path, item_id=parent_id, action="children")
+        url = await self._path_to_url_async(path, item_id=parent_id, action="children")
         response = await self._msgraph_post(
             url,
             json={
@@ -670,7 +672,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
 
     async def _mv(self, path1, path2, **kwargs):
         source_item_id = await self._get_item_id(path1, throw_on_missing=True)
-        url = self._path_to_url(path1, item_id=source_item_id)
+        url = await self._path_to_url_async(path1, item_id=source_item_id)
         path2 = self._strip_protocol(path2)
         destination_item_id = await self._get_item_id(path2)
         item_reference = None
@@ -774,14 +776,16 @@ class AbstractMSGraphFS(AsyncFileSystem):
         item_id = item_id or await self._get_item_id(path)
         if item_id and not truncate:
             if truncate:
-                url = self._path_to_url(path, item_id=item_id, action="content")
+                url = await self._path_to_url_async(
+                    path, item_id=item_id, action="content"
+                )
                 await self._msgraph_put(
                     url,
                     content=b"",
                     headers={"Content-Type": "application/octet-stream"},
                 )
             else:
-                url = self._path_to_url(path, item_id=item_id)
+                url = await self._path_to_url_async(path, item_id=item_id)
                 await self._msgraph_patch(
                     url, json={"lastModifiedDateTime": datetime.now().isoformat()}
                 )
@@ -789,7 +793,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             parent_path, file_name = path.rsplit("/", 1)
             parent_id = await self._get_item_id(parent_path, throw_on_missing=True)
             item_id = f"{parent_id}:/{file_name}:"
-            url = self._path_to_url(path, item_id=item_id, action="content")
+            url = await self._path_to_url_async(path, item_id=item_id, action="content")
             headers = {"Content-Type": self._guess_type(path)}
             await self._msgraph_put(url, content=b"", headers=headers)
         self.invalidate_cache(path)
@@ -836,7 +840,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             bytes: stream of content
         """
         params = params or {}
-        url = self._path_to_url(path, item_id=item_id, action="content")
+        url = await self._path_to_url_async(path, item_id=item_id, action="content")
         response = await self._msgraph_get(url, **params)
         return response.content
 
@@ -845,7 +849,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
     async def _preview(self, path, item_id: str | None = None) -> str:
         if not await self._isfile(path):
             raise FileNotFoundError(f"File not found: {path}")
-        url = self._path_to_url(path, item_id=item_id, action="preview")
+        url = await self._path_to_url_async(path, item_id=item_id, action="preview")
         response = await self._msgraph_post(url)
         return response.json().get("getUrl", [])
 
@@ -865,7 +869,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         """
         if not await self._isfile(path):
             raise FileNotFoundError(f"File not found: {path}")
-        url = self._path_to_url(path, item_id=item_id, action="checkout")
+        url = await self._path_to_url_async(path, item_id=item_id, action="checkout")
         await self._msgraph_post(url)
 
     checkout = sync_wrapper(_checkout)
@@ -886,7 +890,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         """
         if not await self._isfile(path):
             raise FileNotFoundError(f"File not found: {path}")
-        url = self._path_to_url(path, item_id=item_id, action="checkin")
+        url = await self._path_to_url_async(path, item_id=item_id, action="checkin")
         await self._msgraph_post(url, json={"comment": comment})
 
     checkin = sync_wrapper(_checkin)
@@ -904,7 +908,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         """
         if not await self._isfile(path):
             raise FileNotFoundError(f"File not found: {path}")
-        url = self._path_to_url(path, item_id=item_id, action="versions")
+        url = await self._path_to_url_async(path, item_id=item_id, action="versions")
         response = await self._msgraph_get(url)
         result = response.json()
         items = result.get("value", [])
@@ -927,7 +931,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
             If given, the item_id will be used instead of the path to get
             the SharePoint IDs of the file or directory.
         """
-        url = self._path_to_url(path, item_id=item_id)
+        url = await self._path_to_url_async(path, item_id=item_id)
         response = await self._msgraph_get(url, params={"select": "sharepointIds"})
         return response.json().get("sharepointIds", {})
 
