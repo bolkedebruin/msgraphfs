@@ -248,8 +248,20 @@ class AbstractMSGraphFS(AsyncFileSystem):
             ),
             "id": drive_item_info.get("id"),
         }
+
+        # Add webUrl if available
+        if "webUrl" in drive_item_info:
+            data["weburl"] = drive_item_info["webUrl"]
+
+        # Add mimetype for files
         if _type == "file":
-            data["mimetype"] = drive_item_info.get("file", {}).get("mimeType", "")
+            file_info = drive_item_info.get("file", {})
+            data["mimetype"] = file_info.get("mimeType", "")
+
+        # Add custom fields if available (typically from SharePoint lists)
+        if "fields" in drive_item_info:
+            data["fields"] = drive_item_info["fields"]
+
         return data
 
     async def _get_item_id(self, path: str, throw_on_missing=False) -> str | None:
