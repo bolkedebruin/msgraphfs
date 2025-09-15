@@ -177,6 +177,13 @@ class AbstractMSGraphFS(AsyncFileSystem):
         """
         raise NotImplementedError
 
+    async def _path_to_url_async(self, path, item_id=None, action=None) -> str:
+        """Async version of _path_to_url.
+
+        Must be implemented by subclasses.
+        """
+        raise NotImplementedError
+
     def _get_path(self, drive_item_info: dict) -> str:
         parent_path = drive_item_info["parentReference"].get("path")
         if not parent_path:
@@ -228,7 +235,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         Returns:
         str: The item ID of the file or directory if it exists, otherwise None.
         """
-        url = self._path_to_url(path)
+        url = await self._path_to_url_async(path)
         try:
             response = await self._msgraph_get(url, params={"select": "id"})
             return response.json()["id"]
@@ -247,7 +254,7 @@ class AbstractMSGraphFS(AsyncFileSystem):
         use as an argument in other methods. see
         https://docs.microsoft.com/en-us/graph/api/resources/itemreference?view=graph-rest-1.0
         """
-        url = self._path_to_url(path, item_id=item_id)
+        url = await self._path_to_url_async(path, item_id=item_id)
         response = await self._msgraph_get(
             url,
             params={
@@ -363,7 +370,9 @@ class AbstractMSGraphFS(AsyncFileSystem):
             a web application).
         """
         source_item_id = await self._get_item_id(path1, throw_on_missing=True)
-        url = self._path_to_url(path1, item_id=source_item_id, action="copy")
+        url = await self._path_to_url_async(
+            path1, item_id=source_item_id, action="copy"
+        )
         path2 = self._strip_protocol(path2)
         parent_path, _file_name = path2.rsplit("/", 1)
         item_reference = await self._get_item_reference(parent_path)
@@ -1092,11 +1101,11 @@ class MSGDriveFS(AbstractMSGraphFS):
                 return self.drive_id
 
     def _path_to_url(self, path, item_id=None, action=None) -> str:
+        # For sync methods, we need to ensure drive_id is available
         if not self.drive_url:
-            raise ValueError(
-                "drive_id not available. Either provide drive_id in constructor "
-                "or call _ensure_drive_id() first."
-            )
+            # Use sync wrapper to ensure drive_id
+            self.ensure_drive_id()
+
         action = action and f"/{action}" if action else ""
         path = self._strip_protocol(path).rstrip("/")
         if path and not path.startswith("/"):
@@ -1167,22 +1176,6 @@ class MSGDriveFS(AbstractMSGraphFS):
     get_recycle_bin_items = sync_wrapper(_get_recycle_bin_items)
     ensure_drive_id = sync_wrapper(_ensure_drive_id)
     get_drive_id_by_name = sync_wrapper(_get_drive_id_by_name)
-
-    # Override some methods to ensure drive_id is available
-    async def _ls(self, *args, **kwargs):
-        if not self.drive_url:
-            await self._ensure_drive_id()
-        return await super()._ls(*args, **kwargs)
-
-    async def _info(self, *args, **kwargs):
-        if not self.drive_url:
-            await self._ensure_drive_id()
-        return await super()._info(*args, **kwargs)
-
-    async def _exists(self, *args, **kwargs):
-        if not self.drive_url:
-            await self._ensure_drive_id()
-        return await super()._exists(*args, **kwargs)
 
 
 class AsyncStreamedFileMixin:
