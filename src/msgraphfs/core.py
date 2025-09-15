@@ -128,23 +128,45 @@ class AbstractMSGraphFS(AsyncFileSystem):
             weakref.finalize(self, self.close_http_session, self.client, self.loop)
         self.use_recycle_bin = kwargs.get("use_recycle_bin", False)
 
+    def __del__(self):
+        """Destructor to ensure HTTP client is properly closed."""
+        try:
+            if hasattr(self, "client") and self.client:
+                self.close_http_session(self.client, getattr(self, "loop", None))
+        except Exception:
+            # Ignore all cleanup errors in destructor
+            pass
+
     @staticmethod
     def close_http_session(
         client: AsyncOAuth2Client, loop: asyncio.AbstractEventLoop | None = None
     ):
-        """Close the HTTP session."""
-        if loop is not None and loop.is_running() and not loop.is_closed():
+        """Close the HTTP session safely."""
+        # Only attempt cleanup if we have a loop and it's still active
+        if loop is not None and not loop.is_closed():
             try:
-                loop = asyncio.get_event_loop()
-                loop.create_task(client.aclose())
-                return
-            except RuntimeError:
+                # Check if the loop is running
+                if loop.is_running():
+                    # Create a task to close the client
+                    loop.create_task(client.aclose())
+                    return
+                else:
+                    # If loop is not running, use sync with a short timeout
+                    sync(loop, client.aclose, timeout=0.1)
+                    return
+            except (RuntimeError, FSTimeoutError, Exception):
+                # Silently ignore cleanup errors - the process is shutting down
                 pass
-            try:
-                sync(loop, client.aclose, timeout=0.1)
-                return
-            except FSTimeoutError:
-                pass
+
+        # If we can't properly close, just ignore - this is cleanup code
+        try:
+            # Last resort: try to close synchronously if possible
+            if hasattr(client, "_client") and hasattr(client._client, "close"):
+                # Some HTTP clients have synchronous close methods
+                client._client.close()
+        except Exception:
+            # Ignore all cleanup errors - we're shutting down anyway
+            pass
 
     def _path_to_url(self, path, item_id=None, action=None) -> str:
         """This method must be implemented by subclasses to convert a path to a valid
@@ -245,6 +267,10 @@ class AbstractMSGraphFS(AsyncFileSystem):
         self, http_method: str, url: URLTypes, *args, **kwargs
     ) -> Response:
         """Call the Microsoft Graph API."""
+        # Ensure token is available before making requests
+        if self.client.token is None:
+            await self.client.fetch_token()
+
         return await _http_call_with_retry(
             self.client.request,
             args=(http_method, url, *args),
@@ -942,7 +968,10 @@ class MSGDriveFS(AbstractMSGraphFS):
     client_secret : str, optional
         OAuth2 client secret. Can also be set via MSGRAPHFS_CLIENT_SECRET environment variable.
     site_name : str, optional
-        The name of the SharePoint site (optional, used for recycle bin and auto drive detection).
+        The name of the SharePoint site (optional, used for site discovery and drive resolution).
+    drive_name : str, optional
+        The name of the SharePoint drive/library (e.g., "Documents", "CustomLibrary").
+        If not provided, uses the default drive for the site.
     oauth2_client_params : dict, optional
         Parameters for the OAuth2 client. If not provided, will be built from client_id, tenant_id, client_secret.
     use_recycle_bin : bool, optional
@@ -963,6 +992,7 @@ class MSGDriveFS(AbstractMSGraphFS):
         tenant_id: str | None = None,
         client_secret: str | None = None,
         site_name: str | None = None,
+        drive_name: str | None = None,
         oauth2_client_params: dict | None = None,
         **kwargs,
     ):
@@ -1000,6 +1030,7 @@ class MSGDriveFS(AbstractMSGraphFS):
         super().__init__(oauth2_client_params=oauth2_client_params, **kwargs)
 
         self.site_name = site_name
+        self.drive_name = drive_name
         self.drive_id = drive_id
 
         # We'll set the drive_url later if drive_id is determined
@@ -1037,15 +1068,28 @@ class MSGDriveFS(AbstractMSGraphFS):
                     "Unable to discover drive_id. Please provide either drive_id or site_name."
                 ) from e
         else:
-            # Get site_id from site_name, then get default drive
+            # Get site_id from site_name, then get specific drive by name or default drive
             site_id = await self._get_site_id()
-            response = await self._msgraph_get(
-                f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive"
-            )
-            drive_info = response.json()
-            self.drive_id = drive_info["id"]
-            self.drive_url = f"https://graph.microsoft.com/v1.0/drives/{self.drive_id}"
-            return self.drive_id
+
+            if self.drive_name:
+                # Find specific drive by name
+                drive_id = await self._get_drive_id_by_name(site_id, self.drive_name)
+                self.drive_id = drive_id
+                self.drive_url = (
+                    f"https://graph.microsoft.com/v1.0/drives/{self.drive_id}"
+                )
+                return self.drive_id
+            else:
+                # Get default drive
+                response = await self._msgraph_get(
+                    f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive"
+                )
+                drive_info = response.json()
+                self.drive_id = drive_info["id"]
+                self.drive_url = (
+                    f"https://graph.microsoft.com/v1.0/drives/{self.drive_id}"
+                )
+                return self.drive_id
 
     def _path_to_url(self, path, item_id=None, action=None) -> str:
         if not self.drive_url:
@@ -1080,6 +1124,23 @@ class MSGDriveFS(AbstractMSGraphFS):
             raise ValueError(f"No site found with name '{self.site_name}'")
         return sites[0]["id"]
 
+    async def _get_drive_id_by_name(self, site_id: str, drive_name: str) -> str:
+        """Get the drive ID for a specific drive name within a site."""
+        url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives"
+        response = await self._msgraph_get(url)
+        drives = response.json().get("value", [])
+
+        for drive in drives:
+            if drive.get("name") == drive_name:
+                return drive["id"]
+
+        # If not found, list available drives for error message
+        available_drives = [d.get("name", "Unknown") for d in drives]
+        raise ValueError(
+            f"Drive '{drive_name}' not found in site '{self.site_name}'. "
+            f"Available drives: {available_drives}"
+        )
+
     async def _get_item_reference(self, path: str, item_id: str | None = None) -> dict:
         # Ensure drive_id is available
         if not self.drive_id:
@@ -1105,6 +1166,7 @@ class MSGDriveFS(AbstractMSGraphFS):
 
     get_recycle_bin_items = sync_wrapper(_get_recycle_bin_items)
     ensure_drive_id = sync_wrapper(_ensure_drive_id)
+    get_drive_id_by_name = sync_wrapper(_get_drive_id_by_name)
 
     # Override some methods to ensure drive_id is available
     async def _ls(self, *args, **kwargs):

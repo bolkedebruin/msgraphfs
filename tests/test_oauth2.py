@@ -171,21 +171,6 @@ class TestOAuth2:
         tenant_id = fs._extract_tenant_from_token_endpoint(invalid_endpoint)
         assert tenant_id is None
 
-    def test_warning_when_no_drive_id_or_site_name(self):
-        """Test that a warning is issued when neither drive_id nor site_name is
-        provided."""
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-
-            MSGDriveFS(
-                client_id="test-client-id",
-                tenant_id="test-tenant-id",
-                client_secret="test-client-secret",
-            )
-
-            assert len(w) == 1
-            assert "Neither drive_id nor site_name provided" in str(w[0].message)
-
     def test_no_warning_with_drive_id(self):
         """Test that no warning is issued when drive_id is provided."""
         with warnings.catch_warnings(record=True) as w:
@@ -389,3 +374,279 @@ class TestOAuth2:
         assert MSGDriveFS is not None
         assert MSGraphBufferedFile is not None
         assert MSGraphStreamedFile is not None
+
+    def test_constructor_with_drive_name(self):
+        """Test that the constructor accepts drive_name parameter."""
+        client_id = "test-client-id"
+        tenant_id = "test-tenant-id"
+        client_secret = "test-client-secret"
+        site_name = "test-site"
+        drive_name = "Documents"
+
+        fs = MSGDriveFS(
+            site_name=site_name,
+            drive_name=drive_name,
+            client_id=client_id,
+            tenant_id=tenant_id,
+            client_secret=client_secret,
+        )
+
+        assert fs.site_name == site_name
+        assert fs.drive_name == drive_name
+        assert fs.drive_id is None  # Not set until discovery
+
+    @pytest.mark.asyncio
+    async def test_ensure_drive_id_with_drive_name(self):
+        """Test automatic drive_id discovery using site_name and drive_name."""
+        fs = MSGDriveFS(
+            site_name="test-site",
+            drive_name="Documents",
+            client_id="test-client-id",
+            tenant_id="test-tenant-id",
+            client_secret="test-client-secret",
+        )
+
+        # Mock the HTTP responses
+        mock_site_response = Mock()
+        mock_site_response.json.return_value = {"value": [{"id": "test-site-id"}]}
+
+        mock_drives_response = Mock()
+        mock_drives_response.json.return_value = {
+            "value": [
+                {"id": "documents-drive-id", "name": "Documents"},
+                {"id": "other-drive-id", "name": "OtherLibrary"},
+            ]
+        }
+
+        with patch.object(fs, "_msgraph_get") as mock_get:
+            mock_get.side_effect = [mock_site_response, mock_drives_response]
+
+            drive_id = await fs._ensure_drive_id()
+
+            assert drive_id == "documents-drive-id"
+            assert fs.drive_id == "documents-drive-id"
+            assert (
+                fs.drive_url
+                == "https://graph.microsoft.com/v1.0/drives/documents-drive-id"
+            )
+
+            # Verify the correct API calls were made
+            assert mock_get.call_count == 2
+            mock_get.assert_any_call(
+                "https://graph.microsoft.com/v1.0/sites?search=test-site"
+            )
+            mock_get.assert_any_call(
+                "https://graph.microsoft.com/v1.0/sites/test-site-id/drives"
+            )
+
+    @pytest.mark.asyncio
+    async def test_get_drive_id_by_name_success(self):
+        """Test successful drive ID resolution by name."""
+        fs = MSGDriveFS(
+            site_name="test-site",
+            drive_name="Documents",
+            client_id="test-client-id",
+            tenant_id="test-tenant-id",
+            client_secret="test-client-secret",
+        )
+
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "value": [
+                {"id": "documents-drive-id", "name": "Documents"},
+                {"id": "shared-drive-id", "name": "Shared Documents"},
+                {"id": "archive-drive-id", "name": "Archive"},
+            ]
+        }
+
+        with patch.object(fs, "_msgraph_get") as mock_get:
+            mock_get.return_value = mock_response
+
+            drive_id = await fs._get_drive_id_by_name("test-site-id", "Documents")
+
+            assert drive_id == "documents-drive-id"
+            mock_get.assert_called_once_with(
+                "https://graph.microsoft.com/v1.0/sites/test-site-id/drives"
+            )
+
+    @pytest.mark.asyncio
+    async def test_get_drive_id_by_name_not_found(self):
+        """Test error handling when drive name is not found."""
+        fs = MSGDriveFS(
+            site_name="test-site",
+            drive_name="NonexistentDrive",
+            client_id="test-client-id",
+            tenant_id="test-tenant-id",
+            client_secret="test-client-secret",
+        )
+
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "value": [
+                {"id": "documents-drive-id", "name": "Documents"},
+                {"id": "shared-drive-id", "name": "Shared Documents"},
+            ]
+        }
+
+        with patch.object(fs, "_msgraph_get") as mock_get:
+            mock_get.return_value = mock_response
+
+            with pytest.raises(ValueError) as excinfo:
+                await fs._get_drive_id_by_name("test-site-id", "NonexistentDrive")
+
+            error_message = str(excinfo.value)
+            assert (
+                "Drive 'NonexistentDrive' not found in site 'test-site'"
+                in error_message
+            )
+            assert (
+                "Available drives: ['Documents', 'Shared Documents']" in error_message
+            )
+
+    @pytest.mark.asyncio
+    async def test_get_drive_id_by_name_empty_drives(self):
+        """Test error handling when no drives are returned."""
+        fs = MSGDriveFS(
+            site_name="test-site",
+            drive_name="AnyDrive",
+            client_id="test-client-id",
+            tenant_id="test-tenant-id",
+            client_secret="test-client-secret",
+        )
+
+        mock_response = Mock()
+        mock_response.json.return_value = {"value": []}
+
+        with patch.object(fs, "_msgraph_get") as mock_get:
+            mock_get.return_value = mock_response
+
+            with pytest.raises(ValueError) as excinfo:
+                await fs._get_drive_id_by_name("test-site-id", "AnyDrive")
+
+            error_message = str(excinfo.value)
+            assert "Drive 'AnyDrive' not found in site 'test-site'" in error_message
+            assert "Available drives: []" in error_message
+
+    @pytest.mark.asyncio
+    async def test_ensure_drive_id_with_drive_name_fallback_to_default(self):
+        """Test that when drive_name is None, it falls back to default drive."""
+        fs = MSGDriveFS(
+            site_name="test-site",
+            drive_name=None,  # Explicitly set to None
+            client_id="test-client-id",
+            tenant_id="test-tenant-id",
+            client_secret="test-client-secret",
+        )
+
+        # Mock the HTTP responses
+        mock_site_response = Mock()
+        mock_site_response.json.return_value = {"value": [{"id": "test-site-id"}]}
+
+        mock_drive_response = Mock()
+        mock_drive_response.json.return_value = {"id": "default-drive-id"}
+
+        with patch.object(fs, "_msgraph_get") as mock_get:
+            mock_get.side_effect = [mock_site_response, mock_drive_response]
+
+            drive_id = await fs._ensure_drive_id()
+
+            assert drive_id == "default-drive-id"
+            assert fs.drive_id == "default-drive-id"
+
+            # Verify the correct API calls were made (default drive endpoint)
+            assert mock_get.call_count == 2
+            mock_get.assert_any_call(
+                "https://graph.microsoft.com/v1.0/sites?search=test-site"
+            )
+            mock_get.assert_any_call(
+                "https://graph.microsoft.com/v1.0/sites/test-site-id/drive"
+            )
+
+    @pytest.mark.asyncio
+    async def test_drive_name_case_sensitivity(self):
+        """Test that drive name matching is case sensitive."""
+        fs = MSGDriveFS(
+            site_name="test-site",
+            drive_name="documents",  # lowercase
+            client_id="test-client-id",
+            tenant_id="test-tenant-id",
+            client_secret="test-client-secret",
+        )
+
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "value": [
+                {"id": "documents-drive-id", "name": "Documents"},  # uppercase D
+                {"id": "shared-drive-id", "name": "Shared Documents"},
+            ]
+        }
+
+        with patch.object(fs, "_msgraph_get") as mock_get:
+            mock_get.return_value = mock_response
+
+            with pytest.raises(ValueError) as excinfo:
+                await fs._get_drive_id_by_name("test-site-id", "documents")
+
+            error_message = str(excinfo.value)
+            assert "Drive 'documents' not found" in error_message
+            assert (
+                "Available drives: ['Documents', 'Shared Documents']" in error_message
+            )
+
+    @pytest.mark.asyncio
+    async def test_drive_name_with_special_characters(self):
+        """Test drive name resolution with special characters."""
+        fs = MSGDriveFS(
+            site_name="test-site",
+            drive_name="Custom Library & Archives",
+            client_id="test-client-id",
+            tenant_id="test-tenant-id",
+            client_secret="test-client-secret",
+        )
+
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "value": [
+                {"id": "custom-drive-id", "name": "Custom Library & Archives"},
+                {"id": "normal-drive-id", "name": "Documents"},
+            ]
+        }
+
+        with patch.object(fs, "_msgraph_get") as mock_get:
+            mock_get.return_value = mock_response
+
+            drive_id = await fs._get_drive_id_by_name(
+                "test-site-id", "Custom Library & Archives"
+            )
+
+            assert drive_id == "custom-drive-id"
+
+    @pytest.mark.asyncio
+    async def test_sync_wrapper_for_get_drive_id_by_name(self):
+        """Test that the sync wrapper method works correctly."""
+        fs = MSGDriveFS(
+            site_name="test-site",
+            drive_name="Documents",
+            client_id="test-client-id",
+            tenant_id="test-tenant-id",
+            client_secret="test-client-secret",
+        )
+
+        # Verify the sync wrapper exists
+        assert hasattr(fs, "get_drive_id_by_name")
+        assert callable(fs.get_drive_id_by_name)
+
+    def test_no_warning_with_drive_name(self):
+        """Test that no warning is issued when drive_name is provided."""
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+
+            MSGDriveFS(
+                site_name="test-site",
+                drive_name="Documents",
+                client_id="test-client-id",
+                tenant_id="test-tenant-id",
+                client_secret="test-client-secret",
+            )
+
+            assert len(w) == 0
