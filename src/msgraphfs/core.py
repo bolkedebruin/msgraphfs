@@ -318,7 +318,121 @@ class AbstractMSGraphFS(AsyncFileSystem):
         if "fields" in drive_item_info:
             data["fields"] = drive_item_info["fields"]
 
+        # Add permissions if they were expanded/included in the response
+        if "permissions" in drive_item_info:
+            data["permissions"] = self._format_permissions(
+                drive_item_info["permissions"]
+            )
+
         return data
+
+    def _format_permissions(self, permissions: list) -> dict:
+        """Format permissions from Microsoft Graph API into a more readable structure.
+
+        Args:
+            permissions: List of permission objects from Graph API
+
+        Returns:
+            dict: Formatted permissions with users, groups, and access levels
+        """
+        if not permissions:
+            return {
+                "users": [],
+                "groups": [],
+                "links": [],
+                "summary": {"total_permissions": 0},
+            }
+
+        users = []
+        groups = []
+        links = []
+
+        for perm in permissions:
+            perm_info = {
+                "id": perm.get("id"),
+                "roles": perm.get("roles", []),
+                "expires": perm.get("expirationDateTime"),
+                "has_password": perm.get("hasPassword", False),
+            }
+
+            # Handle different grantee types
+            granted_to = perm.get("grantedTo")
+            granted_to_identities = perm.get("grantedToIdentities", [])
+
+            if granted_to:
+                # Direct user/group permission
+                if granted_to.get("user"):
+                    user_info = granted_to["user"]
+                    users.append(
+                        {
+                            **perm_info,
+                            "type": "user",
+                            "email": user_info.get("email"),
+                            "display_name": user_info.get("displayName"),
+                            "id": user_info.get("id"),
+                        }
+                    )
+                elif granted_to.get("group"):
+                    group_info = granted_to["group"]
+                    groups.append(
+                        {
+                            **perm_info,
+                            "type": "group",
+                            "email": group_info.get("email"),
+                            "display_name": group_info.get("displayName"),
+                            "id": group_info.get("id"),
+                        }
+                    )
+
+            # Handle multiple identities (e.g., for sharing links)
+            for identity in granted_to_identities:
+                if identity.get("user"):
+                    user_info = identity["user"]
+                    users.append(
+                        {
+                            **perm_info,
+                            "type": "user",
+                            "email": user_info.get("email"),
+                            "display_name": user_info.get("displayName"),
+                            "id": user_info.get("id"),
+                        }
+                    )
+                elif identity.get("group"):
+                    group_info = identity["group"]
+                    groups.append(
+                        {
+                            **perm_info,
+                            "type": "group",
+                            "email": group_info.get("email"),
+                            "display_name": group_info.get("displayName"),
+                            "id": group_info.get("id"),
+                        }
+                    )
+
+            # Handle sharing links
+            link = perm.get("link")
+            if link:
+                links.append(
+                    {
+                        **perm_info,
+                        "type": "link",
+                        "link_type": link.get("type"),  # e.g., "view", "edit", "embed"
+                        "scope": link.get("scope"),  # e.g., "anonymous", "organization"
+                        "web_url": link.get("webUrl"),
+                    }
+                )
+
+        return {
+            "users": users,
+            "groups": groups,
+            "links": links,
+            "summary": {
+                "total_permissions": len(permissions),
+                "user_count": len(users),
+                "group_count": len(groups),
+                "link_count": len(links),
+            },
+        }
 
     async def _get_item_id(self, path: str, throw_on_missing=False) -> str | None:
         """Get the item ID of a file or directory.
@@ -1059,6 +1173,48 @@ class AbstractMSGraphFS(AsyncFileSystem):
         self.invalidate_cache(path)
 
     set_properties = sync_wrapper(_set_properties)
+
+    async def _get_permissions(self, path: str, item_id: str | None = None) -> dict:
+        """Get detailed permissions for a file or directory.
+
+        This method fetches the permissions from the Microsoft Graph API and formats them
+        into a more readable structure showing users, groups, and sharing links with their
+        respective access levels.
+
+        Parameters
+        ----------
+        path : str
+            Path of the file or directory to get permissions for
+        item_id: str
+            If given, the item_id will be used instead of the path to get
+            the permissions for the file or directory.
+
+        Returns
+        -------
+        dict
+            Formatted permissions with users, groups, links, and summary information
+
+        Examples
+        --------
+        >>> permissions = fs.get_permissions("/documents/important.docx")
+        >>> print(f"Total permissions: {permissions['summary']['total_permissions']}")
+        >>> for user in permissions['users']:
+        ...     print(f"User: {user['display_name']} - Roles: {user['roles']}")
+        """
+        url = await self._path_to_url_async(path, item_id=item_id, action="permissions")
+        response = await self._msgraph_get(url)
+        result = response.json()
+        permissions = result.get("value", [])
+
+        # Handle pagination
+        while "@odata.nextLink" in result:
+            response = await self._msgraph_get(result["@odata.nextLink"])
+            result = response.json()
+            permissions.extend(result.get("value", []))
+
+        return self._format_permissions(permissions)
+
+    get_permissions = sync_wrapper(_get_permissions)
 
 
 class MSGDriveFS(AbstractMSGraphFS):
