@@ -1,120 +1,239 @@
 # MSGraphFS
 
-This python package is a [fsspec](https://filesystem-spec.readthedocs.io/) based filesystem-like interface to drives exposed through the Microsoft graph API (OneDrive, Sharepoint, etc).
+A [fsspec](https://filesystem-spec.readthedocs.io/) based filesystem for Microsoft Graph API drives (SharePoint, OneDrive). Features lazy initialization, fork-safety for multi-process environments like Airflow, and comprehensive permission management.
 
-see:
-https://learn.microsoft.com/en-us/graph/api/resources/onedrive?view=graph-rest-1.0
+📖 [Microsoft Graph OneDrive API Documentation](https://learn.microsoft.com/en-us/graph/api/resources/onedrive?view=graph-rest-1.0)
 
-## Usage
+## 🚀 Quick Start
 
-To use the Microsoft Drive filesystem (for exemple a sharepoint documents libraty), you need to create a new instance of the
-`msgraphfs.MSGDriveFS` class. You can also use the `msgd` protocol to lookup the
-class using `fsspec.get_filesystem_class`.
+### Simple Usage
 
 ```python
 import msgraphfs
 
+# Easy setup - just provide your app credentials and site/drive names
 fs = msgraphfs.MSGDriveFS(
-    client_id="YOUR_CLIENT_ID",
-    drive_id="YOUR_DRIVE_ID",
-    oauth2_client_params = {...})
+    client_id="your-client-id",
+    tenant_id="your-tenant-id",
+    client_secret="your-client-secret",
+    site_name="YourSiteName",        # SharePoint site name
+    drive_name="Documents"           # Optional: defaults to site's default drive
+)
+
+# Start using it like any filesystem
+files = fs.ls("/")
+print(f"Found {len(files)} items")
+
+# Read files
+with fs.open("/path/to/file.txt") as f:
+    content = f.read()
+
+# Write files
+with fs.open("/path/to/new_file.txt", "w") as f:
+    f.write("Hello SharePoint!")
+```
+
+### Using fsspec Protocol
+
+```python
+import fsspec
+
+fs = fsspec.filesystem("msgd",
+    client_id="your-client-id",
+    tenant_id="your-tenant-id",
+    client_secret="your-client-secret",
+    site_name="YourSiteName",
+    drive_name="Documents"
+)
 
 fs.ls("/")
+```
 
-with fs.open("/path/to/file.txt") as f:
-    print(f.read())
+### Environment Variables
+
+You can also use environment variables:
+
+```bash
+export MSGRAPHFS_CLIENT_ID="your-client-id"
+export MSGRAPHFS_TENANT_ID="your-tenant-id"
+export MSGRAPHFS_CLIENT_SECRET="your-client-secret"
 ```
 
 ```python
+import msgraphfs
 
-import fsspec
-
-fs = fsspec.get_filesystem_class("msgd")(
-    client_id="YOUR_CLIENT
-    drive_id="YOUR_DRIVE_ID",
-    oauth2_client_params = {...})
-
-fs.ls("/")
-
+# Credentials loaded from environment
+fs = msgraphfs.MSGDriveFS(
+    site_name="YourSiteName",
+    drive_name="Documents"
+)
 ```
 
-### Specific functionalities
+## ✨ Key Features
 
-- `ls`, `info` : Both methods can take an `expand` additional argument. This
-  argument is a string that will be passed as the `expand` query parameter to
-  the microsoft graph API call used to get the file information. This can be
-  used to get additional information about the file, such as the `thumbnails` or
-  the `permissions` or ...
+### 🔧 **Automatic Discovery**
+- **No manual drive/site ID lookup required** - just provide site and drive names
+- **Automatic OAuth2 token management** - handles client credentials flow
+- **Fork-safe lazy initialization** - perfect for multi-process environments like Airflow
 
-- `checkin`, `checkout` : These methods are used to checkin/checkout a file.
-  They take the path of the file to checkin/checkout as argument. The `checking`
-  method also take an additional `comment` argument.
+### 🔐 **Permission Management**
+```python
+# Get detailed permissions for any file/directory
+permissions = fs.get_permissions("/sensitive-document.pdf")
 
-- `get_versions` : This method returns the list of versions of a file. It takes
-  the path of the file as argument.
+print(f"Total permissions: {permissions['summary']['total_permissions']}")
+print(f"Users with access: {permissions['summary']['user_count']}")
 
-- `preview` : This method returns a url to preview the file. It takes the
-  path of the file as argument.
+# Check specific users and roles
+for user in permissions['users']:
+    print(f"{user['display_name']}: {', '.join(user['roles'])}")
+```
 
-- `get_content` : This method returns the content of a file. It takes the path
-  or the item_id of the file as argument. You can also give the `format` argument
-  to specify the expected format of the content. It can be useful when converting a word document to a pdf.
+### 📁 **Enhanced File Operations**
+- **Expand queries**: Get additional metadata with `expand="permissions"` or `expand="thumbnails"`
+- **Version control**: `get_versions()`, `checkin()`, `checkout()`
+- **File preview**: `preview()` for web preview URLs
+- **Format conversion**: `get_content(format="pdf")` to convert documents
 
-In addition to the methods above, some methods can take an additional argument, `item_id`. This argument is the id of the drive item provided by the Microsoft
-Graph API. It can be used to avoid making an additional API call to
-get the item id or to store a reference to a drive item independently of the
-path. (If the drive item is moved, the path will changed but the item id won't).
+### 🚀 **Airflow Integration**
+```python
+from airflow.io.path import ObjectStoragePath, attach
+import msgraphfs
 
-## Installation
+# Safe to do at module level - lazy initialization prevents fork issues
+attach(protocol="sharepoint", fs=msgraphfs.MSGDriveFS(
+    site_name="YourSite",
+    drive_name="Documents",
+    # credentials from environment or parameters
+))
 
+@task
+def process_files():
+    # Works perfectly in Airflow tasks
+    src_path = ObjectStoragePath("sharepoint://folder/file.docx")
+    content = src_path.read_text()
+    return content
+```
+
+## 📋 Advanced Usage
+
+### Working with Item IDs
+Many methods accept an optional `item_id` parameter for efficiency:
+
+```python
+# Get item ID for later use
+item_id = fs.get_item_id("/important/document.pdf")
+
+# Use item_id to avoid path lookups
+info = fs.info("/any/path", item_id=item_id)
+content = fs.get_content(item_id=item_id)
+permissions = fs.get_permissions(item_id=item_id)
+```
+
+### Document Conversion
+```python
+# Convert Word document to PDF
+pdf_content = fs.get_content("/document.docx", format="pdf")
+
+# Get file preview URL
+preview_url = fs.preview("/presentation.pptx")
+```
+
+### Version Control
+```python
+# Check out for editing
+fs.checkout("/document.docx")
+
+# Make changes...
+with fs.open("/document.docx", "w") as f:
+    f.write("Updated content")
+
+# Check back in with comment
+fs.checkin("/document.docx", "Updated quarterly numbers")
+
+# View version history
+versions = fs.get_versions("/document.docx")
+for version in versions:
+    print(f"Version {version['id']}: {version['lastModifiedDateTime']}")
+```
+
+## 🔧 Installation
+
+```bash
+uv add msgraphfs
+```
+
+Or with pip:
 ```bash
 pip install msgraphfs
 ```
 
-### Get your drive id
+## ⚙️ Setup Requirements
 
-To get the drive id of your drive, you can use the microsoft graph explorer:
-https://developer.microsoft.com/en-us/graph/graph-explorer
+### Azure App Registration
 
-The first step is to get the site id of your site. You can do this by making a
-`GET` request to the following url:
+1. **Register an Azure AD application** at https://portal.azure.com
+2. **Configure API permissions** (Application permissions for client credentials flow):
+   - `Sites.Read.All` or `Sites.ReadWrite.All`
+   - `Files.Read.All` or `Files.ReadWrite.All`
+   - ⚠️ **Important**: Grant admin consent for your organization
+3. **Create a client secret**
+4. **Note down**:
+   - Application (client) ID
+   - Directory (tenant) ID
+   - Client secret value
 
-```bash
-https://graph.microsoft.com/v1.0/sites/{url}
+### OAuth2 Scopes
+
+MSGraphFS uses **client credentials flow** with the **default scope** (`https://graph.microsoft.com/.default`). This automatically includes all the application permissions you've granted to your Azure app registration.
+
+**You don't need to specify individual scopes** - the library handles this automatically! 🎯
+
+### SharePoint Site Access
+
+- Ensure your Azure app has access to the SharePoint site
+- You only need the **site name** and **drive name** (e.g., "Documents")
+- No manual ID lookups required! 🎉
+
+### Legacy Usage (Advanced)
+
+If you prefer to specify drive IDs directly:
+
+```python
+fs = msgraphfs.MSGDriveFS(
+    client_id="your-client-id",
+    tenant_id="your-tenant-id",
+    client_secret="your-client-secret",
+    drive_id="specific-drive-id"  # Skip auto-discovery
+)
 ```
 
-where `{url}` is the url of your site without the protocol. For example, if your
-site is `https://mycompany.sharepoint.com/sites/mysite`, you should use
-`mycompany.sharepoint.com/sites/mysite` as the url.
+Find drive IDs using [Microsoft Graph Explorer](https://developer.microsoft.com/en-us/graph/graph-explorer):
+- Sites: `GET /sites/{hostname}:/sites/{site-name}`
+- Drives: `GET /sites/{site-id}/drives`
 
-In the response, you will find the `id` of the site.
+## 🛠️ Development
 
-
-Now, you can get your drive id by making a `GET` request to the following url:
-
-```bash
-  https://graph.microsoft.com/v1.0/sites/{site_id}/drives/
-```
-
-where `{site_id}` is the id of the site you got in the previous step.
-
-## Development
-
-To develop this package, you can clone the repository and install the
-dependencies using pip:
+To develop this package, you can clone the repository and install the dependencies using uv:
 
 ```bash
 git clone your-repo-url (a fork of https://github.com/acsone/msgraphfs)
-pip install -e .
+cd msgraphfs
+uv sync
 ```
 
-This will install the package in editable mode, so you can make changes to the
-code and test them without having to reinstall the package every time.
+This will install the package in editable mode with all dependencies, so you can make changes to the code and test them without having to reinstall the package every time.
 
-To run the tests, you will need to install the test dependencies. You can achieve this by running:
+To run the tests with the test dependencies:
 
 ```bash
+uv run pytest
+```
+
+Or with pip (legacy):
+```bash
 pip install -e .[test]
+pytest
 ```
 
 Testing the package requires you to have access to a Microsoft Drive (OneDrive, Sharepoint, etc) and to have the `client_id`, `client_secret`, `tenant_id`, `dirve_id`, `site_name` and the user's
