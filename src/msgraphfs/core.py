@@ -4,6 +4,7 @@ import logging
 import mimetypes
 import os
 import re
+import threading
 import weakref
 
 import httpx
@@ -31,6 +32,19 @@ HTTPX_RETRYABLE_HTTP_STATUS_CODES = (500, 502, 503, 504)
 
 
 _logger = logging.getLogger(__name__)
+
+
+def get_running_loop():
+    """Get the currently running event loop."""
+    # this was removed from fsspec in https://github.com/fsspec/filesystem_spec/pull/1134
+    if hasattr(asyncio, "get_running_loop"):
+        return asyncio.get_running_loop()
+    else:
+        loop = asyncio._get_running_loop()
+        if loop is None:
+            raise RuntimeError("no running event loop")
+        else:
+            return loop
 
 
 def parse_range_header(range_header):
@@ -126,13 +140,54 @@ class AbstractMSGraphFS(AsyncFileSystem):
             asynchronous=asynchronous, loop=loop or get_loop(), **super_kwargs
         )
 
-        self.client: AsyncOAuth2Client = AsyncOAuth2Client(
-            **oauth2_client_params,
+        # Store initialization parameters for lazy initialization
+        self._oauth2_client_params = oauth2_client_params
+        self._client = None
+        self._client_lock = threading.Lock() if not asynchronous else None
+        self._client_pid = None  # Track which process created the client
+        self.use_recycle_bin = kwargs.get("use_recycle_bin", False)
+
+    @property
+    def client(self) -> AsyncOAuth2Client:
+        """Lazy-initialized, fork-safe OAuth2 client."""
+        current_pid = os.getpid()
+
+        # Check if we need to initialize or reinitialize after fork
+        if self._client is None or self._client_pid != current_pid:
+            if self.asynchronous:
+                # For async mode, we can't use locks, but async is typically single-threaded
+                self._init_client()
+                self._client_pid = current_pid
+            else:
+                # Thread-safe lazy initialization for sync mode
+                with self._client_lock:
+                    # Double-check after acquiring lock
+                    if self._client is None or self._client_pid != current_pid:
+                        self._init_client()
+                        self._client_pid = current_pid
+
+        return self._client
+
+    def _init_client(self):
+        """Initialize the OAuth2 client."""
+        # Close existing client if it exists
+        if self._client is not None:
+            try:
+                # Try to close the old client gracefully
+                self.close_http_session(self._client, getattr(self, "loop", None))
+            except Exception:
+                # Ignore errors during cleanup
+                pass
+
+        # Create new client
+        self._client = AsyncOAuth2Client(
+            **self._oauth2_client_params,
             follow_redirects=True,
         )
+
+        # Register cleanup for non-async mode
         if not self.asynchronous:
-            weakref.finalize(self, self.close_http_session, self.client, self.loop)
-        self.use_recycle_bin = kwargs.get("use_recycle_bin", False)
+            weakref.finalize(self, self.close_http_session, self._client, self.loop)
 
     def __del__(self):
         """Destructor to ensure HTTP client is properly closed."""
@@ -143,25 +198,26 @@ class AbstractMSGraphFS(AsyncFileSystem):
             # Ignore all cleanup errors in destructor
             pass
 
+    def _get_loop(self):
+        """Get the current event loop, following adlfs pattern."""
+        try:
+            # Need to confirm there is an event loop running in
+            # the thread. If not, create the fsspec loop
+            # and set it. This is to handle issues with
+            # Async Credentials from the Azure SDK
+            loop = get_running_loop()
+        except RuntimeError:
+            from fsspec.asyn import get_loop
+
+            loop = get_loop()
+            asyncio.set_event_loop(loop)
+
+        return loop
+
     @property
     def loop(self):
-        """Fork-safe loop property that reinitializes the loop after fork detection."""
-        if self._pid != os.getpid():
-            # Fork detected - reinitialize the loop for the new process
-            self._pid = os.getpid()
-            if not self.asynchronous:
-                from fsspec.asyn import get_loop
-
-                self._loop = get_loop()
-                # Also need to set the event loop for the new process
-                import asyncio
-
-                try:
-                    asyncio.set_event_loop(self._loop)
-                except RuntimeError:
-                    # Event loop might already be set
-                    pass
-        return self._loop
+        """Get the event loop for this filesystem."""
+        return self._get_loop()
 
     @staticmethod
     def close_http_session(
