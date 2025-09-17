@@ -160,12 +160,12 @@ for version in versions:
 ## 🔧 Installation
 
 ```bash
-uv add msgraphfs
+uv add msgraphfs-dev
 ```
 
 Or with pip:
 ```bash
-pip install msgraphfs
+pip install msgraphfs-dev
 ```
 
 ## ⚙️ Setup Requirements
