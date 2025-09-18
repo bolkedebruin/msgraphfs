@@ -18,7 +18,6 @@ dependencies = [
     "fsspec>=0.7.5",
     "httpx[http2]",
     "authlib",
-    "ruff>=0.13.0",
 ]
 requires-python = ">=3.9"
 
@@ -30,6 +29,7 @@ test = [
     "coverage[toml]",
     "keyring",
     "requests",
+    "ruff>=0.13.0",
 ]
 release = [
     "towncrier",
