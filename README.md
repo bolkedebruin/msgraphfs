@@ -91,9 +91,9 @@ The `storage_options` can be instantiated with the following authentication para
 For more details on all available parameters, see the [MSGDriveFS documentation](https://github.com/your-repo/msgraphfs).
 
 The following environment variables can be set and will be automatically detected:
-- `MSGRAPHFS_CLIENT_ID`
-- `MSGRAPHFS_TENANT_ID`
-- `MSGRAPHFS_CLIENT_SECRET`
+- `MSGRAPHFS_CLIENT_ID` (or `AZURE_CLIENT_ID` as fallback)
+- `MSGRAPHFS_TENANT_ID` (or `AZURE_TENANT_ID` as fallback)
+- `MSGRAPHFS_CLIENT_SECRET` (or `AZURE_CLIENT_SECRET` as fallback)
 
 ### Usage modes
 

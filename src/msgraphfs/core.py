@@ -1354,11 +1354,11 @@ class MSGDriveFS(AbstractMSGraphFS):
     drive_id : str, optional
         The ID of the SharePoint drive. If provided, enables single-site mode.
     client_id : str, optional
-        OAuth2 client ID. Can also be set via MSGRAPHFS_CLIENT_ID environment variable.
+        OAuth2 client ID. Can also be set via MSGRAPHFS_CLIENT_ID or AZURE_CLIENT_ID environment variables.
     tenant_id : str, optional
-        OAuth2 tenant ID. Can also be set via MSGRAPHFS_TENANT_ID environment variable.
+        OAuth2 tenant ID. Can also be set via MSGRAPHFS_TENANT_ID or AZURE_TENANT_ID environment variables.
     client_secret : str, optional
-        OAuth2 client secret. Can also be set via MSGRAPHFS_CLIENT_SECRET environment variable.
+        OAuth2 client secret. Can also be set via MSGRAPHFS_CLIENT_SECRET or AZURE_CLIENT_SECRET environment variables.
     site_name : str, optional
         The name of the SharePoint site. If provided with drive_name, enables single-site mode.
     drive_name : str, optional
@@ -1396,9 +1396,22 @@ class MSGDriveFS(AbstractMSGraphFS):
         **kwargs,
     ):
         # Get OAuth2 credentials from parameters or environment variables
-        self.client_id = client_id or os.getenv("MSGRAPHFS_CLIENT_ID")
-        self.tenant_id = tenant_id or os.getenv("MSGRAPHFS_TENANT_ID")
-        self.client_secret = client_secret or os.getenv("MSGRAPHFS_CLIENT_SECRET")
+        # Check MSGRAPHFS_* variables first, then fall back to standard AZURE_* variables
+        self.client_id = (
+            client_id
+            or os.getenv("MSGRAPHFS_CLIENT_ID")
+            or os.getenv("AZURE_CLIENT_ID")
+        )
+        self.tenant_id = (
+            tenant_id
+            or os.getenv("MSGRAPHFS_TENANT_ID")
+            or os.getenv("AZURE_TENANT_ID")
+        )
+        self.client_secret = (
+            client_secret
+            or os.getenv("MSGRAPHFS_CLIENT_SECRET")
+            or os.getenv("AZURE_CLIENT_SECRET")
+        )
 
         # Parse URL path if provided to extract site_name and drive_name
         if url_path:
@@ -1430,8 +1443,9 @@ class MSGDriveFS(AbstractMSGraphFS):
                 raise ValueError(
                     "Either oauth2_client_params must be provided, or all of "
                     "client_id, tenant_id, and client_secret must be provided "
-                    "(either as parameters or environment variables MSGRAPHFS_CLIENT_ID, "
-                    "MSGRAPHFS_TENANT_ID, MSGRAPHFS_CLIENT_SECRET)"
+                    "(either as parameters or environment variables MSGRAPHFS_CLIENT_ID/"
+                    "AZURE_CLIENT_ID, MSGRAPHFS_TENANT_ID/AZURE_TENANT_ID, "
+                    "MSGRAPHFS_CLIENT_SECRET/AZURE_CLIENT_SECRET)"
                 )
 
             # Build OAuth2 client parameters with proper configuration
