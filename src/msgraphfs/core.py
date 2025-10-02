@@ -6,6 +6,7 @@ import os
 import re
 import threading
 import weakref
+from urllib.parse import urlparse
 
 import httpx
 from authlib.integrations.httpx_client import AsyncOAuth2Client
@@ -61,6 +62,126 @@ def parse_range_header(range_header):
         return start, end
     else:
         raise ValueError("Invalid Range header format")
+
+
+def parse_msgraph_url(url_path):  # noqa: C901
+    """Parse a msgraph URL to extract site_name, drive_name, and path.
+
+    Supports formats:
+    - msgd://site_name/drive_name/path/to/file
+    - sharepoint://site_name/drive_name/path/to/file
+    - onedrive://drive_name/path/to/file
+    - msgd://site_name/drive_name
+    - msgd://site_name
+
+    Args:
+        url_path: The URL or path to parse
+
+    Returns:
+        tuple: (site_name, drive_name, path) where path defaults to "/"
+    """
+    if not url_path:
+        return None, None, "/"
+
+    # Handle URL format
+    if "://" in url_path:
+        parsed = urlparse(url_path)
+        protocol = parsed.scheme.lower()
+        path_parts = parsed.path.strip("/").split("/") if parsed.path.strip("/") else []
+
+        if protocol in ["msgd", "sharepoint"]:
+            # msgd:// and sharepoint:// format: protocol://site_name/drive_name/path
+            site_name = parsed.netloc if parsed.netloc else None
+            if not path_parts:
+                return site_name, None, "/"
+            elif len(path_parts) == 1:
+                return site_name, path_parts[0], "/"
+            else:
+                return site_name, path_parts[0], "/" + "/".join(path_parts[1:])
+
+        elif protocol == "onedrive":
+            # onedrive:// format: onedrive://drive_name/path (no site, personal OneDrive)
+            # The netloc becomes the drive name for OneDrive
+            drive_name = parsed.netloc if parsed.netloc else None
+            if not drive_name and path_parts:
+                # If no netloc, first path part is drive name
+                drive_name = path_parts[0]
+                file_path = (
+                    "/" + "/".join(path_parts[1:]) if len(path_parts) > 1 else "/"
+                )
+            else:
+                # netloc is drive name, path is file path
+                file_path = "/" + "/".join(path_parts) if path_parts else "/"
+            return None, drive_name, file_path
+
+        else:
+            # Unknown protocol, treat like msgd://
+            site_name = parsed.netloc if parsed.netloc else None
+            if not path_parts:
+                return site_name, None, "/"
+            elif len(path_parts) == 1:
+                return site_name, path_parts[0], "/"
+            else:
+                return site_name, path_parts[0], "/" + "/".join(path_parts[1:])
+    else:
+        # Handle path-only format
+        path_parts = url_path.strip("/").split("/") if url_path.strip("/") else []
+        site_name = None
+
+        if not path_parts:
+            return site_name, None, "/"
+        elif len(path_parts) == 1:
+            return site_name, path_parts[0], "/"
+        else:
+            return site_name, path_parts[0], "/" + "/".join(path_parts[1:])
+
+
+def msgraph_filesystem_factory(
+    client_id: str | None = None,
+    tenant_id: str | None = None,
+    client_secret: str | None = None,
+    site_name: str | None = None,
+    drive_name: str | None = None,
+    oauth2_client_params: dict | None = None,
+    **kwargs,
+):
+    """Factory function for creating MSGraph filesystem instances.
+
+    This function is used by fsspec.filesystem() to create appropriate
+    filesystem instances based on the parameters provided.
+
+    Args:
+        client_id: OAuth2 client ID
+        tenant_id: OAuth2 tenant ID
+        client_secret: OAuth2 client secret
+        site_name: SharePoint site name
+        drive_name: SharePoint drive/library name
+        oauth2_client_params: Pre-built OAuth2 parameters
+        **kwargs: Additional arguments
+
+    Returns:
+        Appropriate filesystem instance (MSGDriveFS or MSGraphFileSystem)
+    """
+    # If both site_name and drive_name are provided, use MSGDriveFS directly
+    if site_name and drive_name:
+        return MSGDriveFS(
+            client_id=client_id,
+            tenant_id=tenant_id,
+            client_secret=client_secret,
+            site_name=site_name,
+            drive_name=drive_name,
+            oauth2_client_params=oauth2_client_params,
+            **kwargs,
+        )
+
+    # Otherwise use MSGraphFileSystem for multi-site/multi-drive operations
+    return MSGraphFileSystem(
+        client_id=client_id,
+        tenant_id=tenant_id,
+        client_secret=client_secret,
+        oauth2_client_params=oauth2_client_params,
+        **kwargs,
+    )
 
 
 def wrap_http_not_found_exceptions(func):
@@ -1217,8 +1338,131 @@ class AbstractMSGraphFS(AsyncFileSystem):
     get_permissions = sync_wrapper(_get_permissions)
 
 
+class MSGraphFileSystem(AsyncFileSystem):
+    """A multi-site filesystem wrapper that can handle site-level operations.
+
+    This class provides an interface to work with multiple SharePoint sites
+    and supports URL-based path specification like:
+    - msgd://site_name/drive_name/path
+    - msgd://site_name
+
+    It delegates drive-level operations to MSGDriveFS instances.
+    """
+
+    protocol = ("msgd", "sharepoint", "onedrive")
+
+    def __init__(
+        self,
+        client_id: str | None = None,
+        tenant_id: str | None = None,
+        client_secret: str | None = None,
+        oauth2_client_params: dict | None = None,
+        asynchronous: bool = False,
+        loop=None,
+        **kwargs,
+    ):
+        super().__init__(asynchronous=asynchronous, loop=loop, **kwargs)
+
+        # Store credentials for creating drive instances
+        self.client_id = client_id or os.getenv("MSGRAPHFS_CLIENT_ID")
+        self.tenant_id = tenant_id or os.getenv("MSGRAPHFS_TENANT_ID")
+        self.client_secret = client_secret or os.getenv("MSGRAPHFS_CLIENT_SECRET")
+        self.oauth2_client_params = oauth2_client_params
+
+        # Cache for drive filesystem instances
+        self._drive_cache = {}
+
+    def _get_drive_fs(self, site_name: str, drive_name: str) -> "MSGDriveFS":
+        """Get or create a MSGDriveFS instance for the specified site and drive."""
+        cache_key = (site_name, drive_name)
+        if cache_key not in self._drive_cache:
+            self._drive_cache[cache_key] = MSGDriveFS(
+                client_id=self.client_id,
+                tenant_id=self.tenant_id,
+                client_secret=self.client_secret,
+                site_name=site_name,
+                drive_name=drive_name,
+                oauth2_client_params=self.oauth2_client_params,
+                asynchronous=self.asynchronous,
+                loop=self.loop,
+            )
+        return self._drive_cache[cache_key]
+
+    def _parse_path(self, path: str):
+        """Parse a path to extract site_name, drive_name, and file path."""
+        site_name, drive_name, file_path = parse_msgraph_url(path)
+        if not site_name:
+            raise ValueError(f"Path must include site name: {path}")
+        if not drive_name:
+            raise ValueError(f"Path must include drive name: {path}")
+        return site_name, drive_name, file_path
+
+    # Delegate all file operations to the appropriate drive filesystem
+    async def _ls(self, path: str, detail: bool = True, **kwargs):
+        site_name, drive_name, file_path = self._parse_path(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+        return await drive_fs._ls(file_path, detail=detail, **kwargs)
+
+    async def _info(self, path: str, **kwargs):
+        site_name, drive_name, file_path = self._parse_path(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+        return await drive_fs._info(file_path, **kwargs)
+
+    async def _cat_file(
+        self, path: str, start: int | None = None, end: int | None = None, **kwargs
+    ):
+        site_name, drive_name, file_path = self._parse_path(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+        return await drive_fs._cat_file(file_path, start=start, end=end, **kwargs)
+
+    def _open(self, path: str, mode: str = "rb", **kwargs):
+        site_name, drive_name, file_path = self._parse_path(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+        return drive_fs._open(file_path, mode=mode, **kwargs)
+
+
 class MSGDriveFS(AbstractMSGraphFS):
     """A filesystem that represents a SharePoint site drive as a filesystem.
+
+    This filesystem supports both traditional parameter-based initialization and new URL-based
+    initialization for improved usability with fsspec.
+
+    Examples:
+    ---------
+    Traditional initialization:
+        fs = MSGDriveFS(
+            client_id="your-client-id",
+            tenant_id="your-tenant-id",
+            client_secret="your-secret",
+            site_name="ProjectQ",
+            drive_name="Documents"
+        )
+
+    URL-based initialization:
+        fs = MSGDriveFS(
+            client_id="your-client-id",
+            tenant_id="your-tenant-id",
+            client_secret="your-secret",
+            url_path="msgd://ProjectQ/Documents"
+        )
+
+    Using with fsspec:
+        import fsspec
+        fs = fsspec.filesystem("msgd", client_id="...", tenant_id="...", client_secret="...")
+        files = fs.ls("msgd://ProjectQ/Documents")
+
+    Automatic path interpretation based on initialization:
+        # No site/drive specified: path = site/drive/file_path
+        fs = MSGDriveFS(client_id="...", tenant_id="...", client_secret="...")
+        files = fs.ls("ProjectQ/Documents/file.txt")  # ProjectQ=site, Documents=drive, file.txt=path
+
+        # Site specified: path = drive/file_path
+        fs = MSGDriveFS(client_id="...", site_name="ProjectQ", ...)
+        files = fs.ls("Documents/file.txt")  # Documents=drive, file.txt=path
+
+        # Both specified: path = file_path (traditional behavior)
+        fs = MSGDriveFS(client_id="...", site_name="ProjectQ", drive_name="Documents", ...)
+        files = fs.ls("file.txt")  # file.txt=path
 
     Parameters:
     -----------
@@ -1235,6 +1479,10 @@ class MSGDriveFS(AbstractMSGraphFS):
     drive_name : str, optional
         The name of the SharePoint drive/library (e.g., "Documents", "CustomLibrary").
         If not provided, uses the default drive for the site.
+    url_path : str, optional
+        URL-style path specification (e.g., "msgd://ProjectQ/Documents").
+        If provided, extracts site_name and drive_name from the URL.
+        URL parameters override direct site_name/drive_name parameters.
     oauth2_client_params : dict, optional
         Parameters for the OAuth2 client. If not provided, will be built from client_id, tenant_id, client_secret.
     use_recycle_bin : bool, optional
@@ -1243,7 +1491,7 @@ class MSGDriveFS(AbstractMSGraphFS):
         Additional arguments passed to the parent class.
     """
 
-    protocol = ["msgd"]
+    protocol = ("msgd", "sharepoint", "onedrive")
 
     # Default OAuth2 scopes for Microsoft Graph API (client credentials flow)
     DEFAULT_SCOPES = ["https://graph.microsoft.com/.default"]
@@ -1259,12 +1507,20 @@ class MSGDriveFS(AbstractMSGraphFS):
         oauth2_client_params: dict | None = None,
         asynchronous: bool = False,
         loop=None,
+        url_path: str | None = None,
         **kwargs,
     ):
         # Get OAuth2 credentials from parameters or environment variables
         self.client_id = client_id or os.getenv("MSGRAPHFS_CLIENT_ID")
         self.tenant_id = tenant_id or os.getenv("MSGRAPHFS_TENANT_ID")
         self.client_secret = client_secret or os.getenv("MSGRAPHFS_CLIENT_SECRET")
+
+        # Parse URL path if provided to extract site_name and drive_name
+        if url_path:
+            parsed_site, parsed_drive, _ = parse_msgraph_url(url_path)
+            # URL parameters override direct parameters
+            site_name = parsed_site or site_name
+            drive_name = parsed_drive or drive_name
 
         # Build oauth2_client_params if not provided
         if oauth2_client_params is None:
@@ -1309,12 +1565,107 @@ class MSGDriveFS(AbstractMSGraphFS):
         else:
             self.drive_url = None
 
+        # Cache drive instances when site/drive need to be resolved from paths
+        self._drive_cache = (
+            {}
+            if not (self.site_name and self.drive_name) and not self.drive_id
+            else None
+        )
+
     def _extract_tenant_from_token_endpoint(self, token_endpoint: str) -> str | None:
         """Extract tenant_id from token endpoint URL."""
         import re
 
         match = re.search(r"/([a-f0-9-]+)/oauth2", token_endpoint)
         return match.group(1) if match else None
+
+    def _parse_path_for_missing_components(self, path: str):
+        """Parse a path to extract missing site_name, drive_name, and return the file
+        path.
+
+        Logic:
+        - If both site_name and drive_name are set: path is the file path
+        - If only site_name is set: path = drive_name/file_path
+        - If neither is set: path = site_name/drive_name/file_path
+        """
+        # If we have both site and drive, no parsing needed
+        if self.site_name and self.drive_name:
+            return self.site_name, self.drive_name, path
+
+        # Parse the path to extract missing components
+        if "://" in path:
+            # Handle URL format
+            parsed_site, parsed_drive, file_path = parse_msgraph_url(path)
+            # For OneDrive URLs, use a default site name if none specified
+            if parsed_site is None and "onedrive://" in path.lower():
+                site_name = self.site_name or "me"  # Use "me" as default OneDrive site
+            else:
+                site_name = self.site_name or parsed_site
+            drive_name = self.drive_name or parsed_drive
+        else:
+            # Handle plain path format
+            if not self.site_name and not self.drive_name:
+                # Need both site and drive from path: site/drive/file_path
+                path_parts = path.strip("/").split("/", 2)
+                if len(path_parts) < 2:
+                    raise ValueError(
+                        f"Path must include site and drive when none specified: {path}"
+                    )
+                site_name = path_parts[0]
+                drive_name = path_parts[1]
+                file_path = "/" + path_parts[2] if len(path_parts) > 2 else "/"
+            elif self.site_name and not self.drive_name:
+                # Need drive from path: drive/file_path
+                path_parts = path.strip("/").split("/", 1)
+                if len(path_parts) < 1:
+                    raise ValueError(
+                        f"Path must include drive name when not specified: {path}"
+                    )
+                site_name = self.site_name
+                drive_name = path_parts[0]
+                file_path = "/" + path_parts[1] if len(path_parts) > 1 else "/"
+            else:
+                # This shouldn't happen but handle gracefully
+                site_name = self.site_name
+                drive_name = self.drive_name
+                file_path = path
+
+        if not site_name or not drive_name:
+            raise ValueError(f"Unable to determine site and drive from path: {path}")
+
+        return site_name, drive_name, file_path
+
+    def _get_drive_fs(self, site_name: str, drive_name: str) -> "MSGDriveFS":
+        """Get or create a MSGDriveFS instance for the specified site and drive."""
+        # If this instance already has the right site/drive, return self
+        if self.site_name == site_name and self.drive_name == drive_name:
+            return self
+
+        # If we have a drive cache, use it
+        if self._drive_cache is not None:
+            cache_key = (site_name, drive_name)
+            if cache_key not in self._drive_cache:
+                self._drive_cache[cache_key] = MSGDriveFS(
+                    client_id=self.client_id,
+                    tenant_id=self.tenant_id,
+                    client_secret=self.client_secret,
+                    site_name=site_name,
+                    drive_name=drive_name,
+                    asynchronous=self.asynchronous,
+                    loop=self.loop,
+                )
+            return self._drive_cache[cache_key]
+
+        # No caching needed, create a new instance
+        return MSGDriveFS(
+            client_id=self.client_id,
+            tenant_id=self.tenant_id,
+            client_secret=self.client_secret,
+            site_name=site_name,
+            drive_name=drive_name,
+            asynchronous=self.asynchronous,
+            loop=self.loop,
+        )
 
     async def _ensure_drive_id(self) -> str:
         """Ensure drive_id is available, discovering it if necessary."""
@@ -1437,6 +1788,87 @@ class MSGDriveFS(AbstractMSGraphFS):
     get_recycle_bin_items = sync_wrapper(_get_recycle_bin_items)
     ensure_drive_id = sync_wrapper(_ensure_drive_id)
     get_drive_id_by_name = sync_wrapper(_get_drive_id_by_name)
+
+    # Override filesystem operations to support path-based site/drive resolution
+    async def _ls(self, path: str, detail: bool = True, **kwargs):
+        """List files, supporting path-based site/drive resolution."""
+        site_name, drive_name, file_path = self._parse_path_for_missing_components(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+
+        # If we got back ourselves, use normal behavior
+        if drive_fs is self:
+            return await super()._ls(file_path, detail=detail, **kwargs)
+        else:
+            # Delegate to the appropriate drive filesystem
+            return await drive_fs._ls(file_path, detail=detail, **kwargs)
+
+    async def _info(self, path: str, **kwargs):
+        """Get file info, supporting path-based site/drive resolution."""
+        site_name, drive_name, file_path = self._parse_path_for_missing_components(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+
+        if drive_fs is self:
+            return await super()._info(file_path, **kwargs)
+        else:
+            return await drive_fs._info(file_path, **kwargs)
+
+    async def _cat_file(
+        self, path: str, start: int | None = None, end: int | None = None, **kwargs
+    ):
+        """Read file content, supporting path-based site/drive resolution."""
+        site_name, drive_name, file_path = self._parse_path_for_missing_components(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+
+        if drive_fs is self:
+            return await super()._cat_file(file_path, start=start, end=end, **kwargs)
+        else:
+            return await drive_fs._cat_file(file_path, start=start, end=end, **kwargs)
+
+    def _open(self, path: str, mode: str = "rb", **kwargs):
+        """Open file, supporting path-based site/drive resolution."""
+        site_name, drive_name, file_path = self._parse_path_for_missing_components(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+
+        if drive_fs is self:
+            return super()._open(file_path, mode=mode, **kwargs)
+        else:
+            return drive_fs._open(file_path, mode=mode, **kwargs)
+
+    async def _exists(self, path: str, **kwargs):
+        """Check if file exists, supporting path-based site/drive resolution."""
+        site_name, drive_name, file_path = self._parse_path_for_missing_components(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+
+        if drive_fs is self:
+            return await super()._exists(file_path, **kwargs)
+        else:
+            return await drive_fs._exists(file_path, **kwargs)
+
+    async def _mkdir(
+        self, path: str, create_parents: bool = True, exist_ok: bool = False, **kwargs
+    ):
+        """Create directory, supporting path-based site/drive resolution."""
+        site_name, drive_name, file_path = self._parse_path_for_missing_components(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+
+        if drive_fs is self:
+            return await super()._mkdir(
+                file_path, create_parents=create_parents, exist_ok=exist_ok, **kwargs
+            )
+        else:
+            return await drive_fs._mkdir(
+                file_path, create_parents=create_parents, exist_ok=exist_ok, **kwargs
+            )
+
+    async def _rm(self, path: str, recursive: bool = False, **kwargs):
+        """Remove file/directory, supporting path-based site/drive resolution."""
+        site_name, drive_name, file_path = self._parse_path_for_missing_components(path)
+        drive_fs = self._get_drive_fs(site_name, drive_name)
+
+        if drive_fs is self:
+            return await super()._rm(file_path, recursive=recursive, **kwargs)
+        else:
+            return await drive_fs._rm(file_path, recursive=recursive, **kwargs)
 
 
 class AsyncStreamedFileMixin:
