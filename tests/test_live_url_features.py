@@ -41,12 +41,8 @@ class TestLiveURLFeatures:
         )
 
         # Test listing files using URL path
-        try:
-            files = fs.ls(f"msgd://{TEST_SITE_NAME}/{TEST_DRIVE_NAME}")
-            assert isinstance(files, list)
-            print(f"✅ Found {len(files)} items in {TEST_SITE_NAME}/{TEST_DRIVE_NAME}")
-        except Exception as e:
-            pytest.fail(f"Failed to list files with URL path: {e}")
+        files = fs.ls(f"msgd://{TEST_SITE_NAME}/{TEST_DRIVE_NAME}")
+        assert isinstance(files, list)
 
     @pytest.mark.live
     def test_url_based_file_info(self):
@@ -68,23 +64,17 @@ class TestLiveURLFeatures:
             client_secret=client_secret,
         )
 
-        try:
-            # First get a list of files
-            files = fs.ls(f"msgd://{TEST_SITE_NAME}/{TEST_DRIVE_NAME}", detail=True)
-            if files:
-                # Get info for the first file using URL path
-                first_file = files[0]
-                file_name = first_file["name"].split("/")[-1]
-                file_url = f"msgd://{TEST_SITE_NAME}/{TEST_DRIVE_NAME}/{file_name}"
+        # First get a list of files
+        files = fs.ls(f"msgd://{TEST_SITE_NAME}/{TEST_DRIVE_NAME}", detail=True)
+        if files:
+            # Get info for the first file using URL path
+            first_file = files[0]
+            file_name = first_file["name"].split("/")[-1]
+            file_url = f"msgd://{TEST_SITE_NAME}/{TEST_DRIVE_NAME}/{file_name}"
 
-                info = fs.info(file_url)
-                assert "name" in info
-                assert "type" in info
-                print(f"✅ Successfully got info for {file_url}")
-            else:
-                print("⚠️  No files found to test info operation")
-        except Exception as e:
-            pytest.fail(f"Failed to get file info with URL path: {e}")
+            info = fs.info(file_url)
+            assert "name" in info
+            assert "type" in info
 
     @pytest.mark.live
     def test_msgdrivefs_url_initialization(self):
@@ -107,12 +97,8 @@ class TestLiveURLFeatures:
             url_path=f"msgd://{TEST_SITE_NAME}/{TEST_DRIVE_NAME}",
         )
 
-        try:
-            files = fs.ls("/")
-            assert isinstance(files, list)
-            print(f"✅ MSGDriveFS with URL path works, found {len(files)} items")
-        except Exception as e:
-            pytest.fail(f"Failed to list files with MSGDriveFS URL initialization: {e}")
+        files = fs.ls("/")
+        assert isinstance(files, list)
 
     @pytest.mark.live
     def test_factory_function_with_credentials(self):
@@ -141,12 +127,8 @@ class TestLiveURLFeatures:
         assert fs.site_name == TEST_SITE_NAME
         assert fs.drive_name == TEST_DRIVE_NAME
 
-        try:
-            files = fs.ls("/")
-            assert isinstance(files, list)
-            print(f"✅ MSGDriveFS (single-site mode) works, found {len(files)} items")
-        except Exception as e:
-            pytest.fail(f"Failed to list files with MSGDriveFS single-site mode: {e}")
+        files = fs.ls("/")
+        assert isinstance(files, list)
 
         # Test MSGDriveFS in multi-site mode for multi-site access
         fs_multi = MSGDriveFS(
@@ -156,12 +138,8 @@ class TestLiveURLFeatures:
         assert isinstance(fs_multi, MSGDriveFS)
         assert fs_multi._multi_site_mode is True
 
-        try:
-            files = fs_multi.ls(f"msgd://{TEST_SITE_NAME}/{TEST_DRIVE_NAME}")
-            assert isinstance(files, list)
-            print(f"✅ MSGDriveFS (multi-site mode) works, found {len(files)} items")
-        except Exception as e:
-            pytest.fail(f"Failed to list files with MSGDriveFS multi-site mode: {e}")
+        files = fs_multi.ls(f"msgd://{TEST_SITE_NAME}/{TEST_DRIVE_NAME}")
+        assert isinstance(files, list)
 
     @pytest.mark.live
     def test_fsspec_open_with_url(self):
@@ -183,30 +161,24 @@ class TestLiveURLFeatures:
             client_secret=client_secret,
         )
 
-        try:
-            # Get a list of files
-            files = fs.ls(f"msgd://{TEST_SITE_NAME}/{TEST_DRIVE_NAME}", detail=True)
-            text_files = [f for f in files if f.get("name", "").endswith(".txt")]
+        # Get a list of files
+        files = fs.ls(f"msgd://{TEST_SITE_NAME}/{TEST_DRIVE_NAME}", detail=True)
+        text_files = [f for f in files if f.get("name", "").endswith(".txt")]
 
-            if text_files:
-                file_name = text_files[0]["name"].split("/")[-1]
-                file_url = f"msgd://{TEST_SITE_NAME}/{TEST_DRIVE_NAME}/{file_name}"
+        if text_files:
+            file_name = text_files[0]["name"].split("/")[-1]
+            file_url = f"msgd://{TEST_SITE_NAME}/{TEST_DRIVE_NAME}/{file_name}"
 
-                # Try to open and read the file
-                with fsspec.open(
-                    file_url,
-                    mode="rb",
-                    client_id=client_id,
-                    tenant_id=tenant_id,
-                    client_secret=client_secret,
-                ) as f:
-                    content = f.read(100)  # Read first 100 bytes
-                    assert isinstance(content, bytes)
-                    print(f"✅ Successfully opened and read {file_url}")
-            else:
-                print("⚠️  No .txt files found to test fsspec.open()")
-        except Exception as e:
-            pytest.fail(f"Failed to open file with fsspec.open(): {e}")
+            # Try to open and read the file
+            with fsspec.open(
+                file_url,
+                mode="rb",
+                client_id=client_id,
+                tenant_id=tenant_id,
+                client_secret=client_secret,
+            ) as f:
+                content = f.read(100)  # Read first 100 bytes
+                assert isinstance(content, bytes)
 
     @pytest.mark.live
     def test_backward_compatibility_with_live_data(self):
@@ -238,17 +210,11 @@ class TestLiveURLFeatures:
             url_path=f"msgd://{TEST_SITE_NAME}/{TEST_DRIVE_NAME}",
         )
 
-        try:
-            files_original = fs_original.ls("/")
-            files_url = fs_url.ls("/")
+        files_original = fs_original.ls("/")
+        files_url = fs_url.ls("/")
 
-            # Both should return the same data
-            assert len(files_original) == len(files_url)
-            print(
-                f"✅ Backward compatibility confirmed: both methods return {len(files_original)} items"
-            )
-        except Exception as e:
-            pytest.fail(f"Backward compatibility test failed: {e}")
+        # Both should return the same data
+        assert len(files_original) == len(files_url)
 
     @pytest.mark.live
     def test_url_path_overrides(self):
@@ -277,12 +243,8 @@ class TestLiveURLFeatures:
         assert fs.site_name == TEST_SITE_NAME
         assert fs.drive_name == TEST_DRIVE_NAME
 
-        try:
-            files = fs.ls("/")
-            assert isinstance(files, list)
-            print(f"✅ URL override works correctly, found {len(files)} items")
-        except Exception as e:
-            pytest.fail(f"URL override test failed: {e}")
+        files = fs.ls("/")
+        assert isinstance(files, list)
 
 
 @pytest.mark.live
@@ -320,9 +282,6 @@ class TestLivePerformanceAndCaching:
         # Should be the same instance and second access should be faster
         assert drive_fs1 is drive_fs2
         assert second_access_time < first_access_time
-        print(
-            f"✅ Caching works: first access {first_access_time:.4f}s, second access {second_access_time:.4f}s"
-        )
 
     def test_multiple_site_access(self):
         """Test accessing multiple sites through MSGDriveFS in multi-site mode."""
@@ -340,23 +299,10 @@ class TestLivePerformanceAndCaching:
             client_id=client_id, tenant_id=tenant_id, client_secret=client_secret
         )
 
-        try:
-            # Access the test site
-            files1 = fs.ls(f"msgd://{TEST_SITE_NAME}/{TEST_DRIVE_NAME}")
-            print(
-                f"✅ Accessed {TEST_SITE_NAME}/{TEST_DRIVE_NAME}: {len(files1)} items"
-            )
+        # Access the test site
+        fs.ls(f"msgd://{TEST_SITE_NAME}/{TEST_DRIVE_NAME}")
 
-            # Could test additional sites if available
-            # For now, just verify the functionality exists
-            assert hasattr(fs, "_drive_cache")
-            assert len(fs._drive_cache) >= 1
-
-        except Exception as e:
-            pytest.fail(f"Multiple site access test failed: {e}")
-
-
-if __name__ == "__main__":
-    # Run with: pytest test_live_url_features.py -m live -v
-    # To skip live tests: pytest test_live_url_features.py -v
-    pytest.main([__file__, "-m", "live", "-v"])
+        # Could test additional sites if available
+        # For now, just verify the functionality exists
+        assert hasattr(fs, "_drive_cache")
+        assert len(fs._drive_cache) >= 1
