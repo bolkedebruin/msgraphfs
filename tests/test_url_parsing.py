@@ -7,7 +7,7 @@ URL-based filesystem initialization.
 
 import pytest
 
-from msgraphfs import MSGDriveFS, MSGraphFileSystem, parse_msgraph_url
+from msgraphfs import MSGDriveFS, parse_msgraph_url
 
 
 class TestURLParsing:
@@ -115,9 +115,9 @@ class TestFilesystemURLInitialization:
         assert fs.site_name == "TestSite"
         assert fs.drive_name == "Documents"
 
-    def test_msgraphfilesystem_initialization(self):
-        """Test MSGraphFileSystem initialization."""
-        fs = MSGraphFileSystem(
+    def test_msgdrivefs_multi_site_initialization(self):
+        """Test MSGDriveFS initialization in multi-site mode."""
+        fs = MSGDriveFS(
             client_id="test_client",
             tenant_id="test_tenant",
             client_secret="test_secret",
@@ -125,23 +125,26 @@ class TestFilesystemURLInitialization:
         assert fs.client_id == "test_client"
         assert fs.tenant_id == "test_tenant"
         assert fs.client_secret == "test_secret"
+        assert fs._multi_site_mode is True
 
-    def test_msgraphfilesystem_path_parsing(self):
-        """Test MSGraphFileSystem path parsing."""
-        fs = MSGraphFileSystem(
+    def test_msgdrivefs_path_parsing(self):
+        """Test MSGDriveFS path parsing in multi-site mode."""
+        fs = MSGDriveFS(
             client_id="test_client",
             tenant_id="test_tenant",
             client_secret="test_secret",
         )
 
-        site, drive, path = fs._parse_path("msgd://TestSite/Documents/file.txt")
+        site, drive, path = fs._parse_path_for_url_routing(
+            "msgd://TestSite/Documents/file.txt"
+        )
         assert site == "TestSite"
         assert drive == "Documents"
         assert path == "/file.txt"
 
-    def test_msgraphfilesystem_path_parsing_errors(self):
-        """Test MSGraphFileSystem path parsing error cases."""
-        fs = MSGraphFileSystem(
+    def test_msgdrivefs_path_parsing_errors(self):
+        """Test MSGDriveFS path parsing error cases in multi-site mode."""
+        fs = MSGDriveFS(
             client_id="test_client",
             tenant_id="test_tenant",
             client_secret="test_secret",
@@ -149,11 +152,11 @@ class TestFilesystemURLInitialization:
 
         # Missing site name should raise ValueError
         with pytest.raises(ValueError, match="Path must include site name"):
-            fs._parse_path("/Documents/file.txt")
+            fs._parse_path_for_url_routing("/Documents/file.txt")
 
         # Missing drive name should raise ValueError
         with pytest.raises(ValueError, match="Path must include drive name"):
-            fs._parse_path("msgd://TestSite")
+            fs._parse_path_for_url_routing("msgd://TestSite")
 
 
 if __name__ == "__main__":

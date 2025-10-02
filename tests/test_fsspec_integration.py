@@ -7,7 +7,7 @@ Tests the fsspec.filesystem() integration and URL-based access patterns.
 import fsspec
 import pytest
 
-from msgraphfs import MSGDriveFS, MSGraphFileSystem, msgraph_filesystem_factory
+from msgraphfs import MSGDriveFS
 
 
 class TestFSSpecIntegration:
@@ -26,15 +26,14 @@ class TestFSSpecIntegration:
             tenant_id="test_tenant",
             client_secret="test_secret",
         )
-        assert isinstance(fs, MSGraphFileSystem)
+        assert isinstance(fs, MSGDriveFS)
         assert fs.client_id == "test_client"
         assert fs.tenant_id == "test_tenant"
         assert fs.client_secret == "test_secret"
 
     def test_fsspec_filesystem_with_site_and_drive(self):
         """Test creating filesystem with specific site and drive parameters."""
-        # When we provide site_name and drive_name, the factory should return MSGDriveFS
-        # But since we registered MSGraphFileSystem as the main handler, we get that instead
+        # When we provide site_name and drive_name, we get MSGDriveFS in single-site mode
         fs = fsspec.filesystem(
             "msgd",
             client_id="test_client",
@@ -43,12 +42,12 @@ class TestFSSpecIntegration:
             site_name="TestSite",
             drive_name="Documents",
         )
-        assert isinstance(fs, MSGraphFileSystem)
+        assert isinstance(fs, MSGDriveFS)
 
-    def test_msgraph_filesystem_factory(self):
-        """Test the factory function directly."""
-        # With site_name and drive_name, should return MSGDriveFS
-        fs = msgraph_filesystem_factory(
+    def test_msgdrivefs_direct_usage(self):
+        """Test MSGDriveFS direct usage for both modes."""
+        # With site_name and drive_name, should be in single-site mode
+        fs = MSGDriveFS(
             client_id="test_client",
             tenant_id="test_tenant",
             client_secret="test_secret",
@@ -58,14 +57,16 @@ class TestFSSpecIntegration:
         assert isinstance(fs, MSGDriveFS)
         assert fs.site_name == "TestSite"
         assert fs.drive_name == "Documents"
+        assert fs._multi_site_mode is False
 
-        # Without site_name and drive_name, should return MSGraphFileSystem
-        fs = msgraph_filesystem_factory(
+        # Without site_name and drive_name, should be in multi-site mode
+        fs = MSGDriveFS(
             client_id="test_client",
             tenant_id="test_tenant",
             client_secret="test_secret",
         )
-        assert isinstance(fs, MSGraphFileSystem)
+        assert isinstance(fs, MSGDriveFS)
+        assert fs._multi_site_mode is True
 
     def test_fsspec_open_with_url(self):
         """Test opening files using fsspec.open() with msgd URLs."""
@@ -88,7 +89,7 @@ class TestFSSpecIntegration:
     def test_fsspec_get_filesystem_class(self):
         """Test getting the filesystem class through fsspec."""
         cls = fsspec.get_filesystem_class("msgd")
-        assert cls == MSGraphFileSystem
+        assert cls == MSGDriveFS
 
     def test_url_to_fs_parsing(self):
         """Test fsspec.url_to_fs() URL parsing."""
@@ -98,7 +99,7 @@ class TestFSSpecIntegration:
             tenant_id="test_tenant",
             client_secret="test_secret",
         )
-        assert isinstance(fs, MSGraphFileSystem)
+        assert isinstance(fs, MSGDriveFS)
         assert path == "TestSite/Documents/folder/file.txt"
 
 
@@ -201,8 +202,8 @@ class TestNewFeatures:
         assert fs.drive_name == "Documents"
 
     def test_msgraphfilesystem_caching(self):
-        """Test that MSGraphFileSystem caches drive filesystem instances."""
-        fs = MSGraphFileSystem(
+        """Test that MSGDriveFS caches drive filesystem instances in multi-site mode."""
+        fs = MSGDriveFS(
             client_id="test_client",
             tenant_id="test_tenant",
             client_secret="test_secret",

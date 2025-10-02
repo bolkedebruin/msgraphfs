@@ -9,7 +9,7 @@ Skip with: pytest -m "not live"
 import fsspec
 import pytest
 
-from msgraphfs import MSGDriveFS, MSGraphFileSystem, msgraph_filesystem_factory
+from msgraphfs import MSGDriveFS
 
 # Test site and drive names (credentials should be provided via environment variables)
 TEST_SITE_NAME = "TestSite"
@@ -127,8 +127,8 @@ class TestLiveURLFeatures:
         if not all([client_id, tenant_id, client_secret]):
             pytest.skip("Live credentials not available")
 
-        # Test factory function returning MSGDriveFS for specific site/drive
-        fs = msgraph_filesystem_factory(
+        # Test MSGDriveFS in single-site mode for specific site/drive
+        fs = MSGDriveFS(
             client_id=client_id,
             tenant_id=tenant_id,
             client_secret=client_secret,
@@ -137,31 +137,31 @@ class TestLiveURLFeatures:
         )
 
         assert isinstance(fs, MSGDriveFS)
+        assert fs._multi_site_mode is False
         assert fs.site_name == TEST_SITE_NAME
         assert fs.drive_name == TEST_DRIVE_NAME
 
         try:
             files = fs.ls("/")
             assert isinstance(files, list)
-            print(f"✅ Factory function MSGDriveFS works, found {len(files)} items")
+            print(f"✅ MSGDriveFS (single-site mode) works, found {len(files)} items")
         except Exception as e:
-            pytest.fail(f"Failed to list files with factory MSGDriveFS: {e}")
+            pytest.fail(f"Failed to list files with MSGDriveFS single-site mode: {e}")
 
-        # Test factory function returning MSGraphFileSystem for multi-site access
-        fs_multi = msgraph_filesystem_factory(
+        # Test MSGDriveFS in multi-site mode for multi-site access
+        fs_multi = MSGDriveFS(
             client_id=client_id, tenant_id=tenant_id, client_secret=client_secret
         )
 
-        assert isinstance(fs_multi, MSGraphFileSystem)
+        assert isinstance(fs_multi, MSGDriveFS)
+        assert fs_multi._multi_site_mode is True
 
         try:
             files = fs_multi.ls(f"msgd://{TEST_SITE_NAME}/{TEST_DRIVE_NAME}")
             assert isinstance(files, list)
-            print(
-                f"✅ Factory function MSGraphFileSystem works, found {len(files)} items"
-            )
+            print(f"✅ MSGDriveFS (multi-site mode) works, found {len(files)} items")
         except Exception as e:
-            pytest.fail(f"Failed to list files with factory MSGraphFileSystem: {e}")
+            pytest.fail(f"Failed to list files with MSGDriveFS multi-site mode: {e}")
 
     @pytest.mark.live
     def test_fsspec_open_with_url(self):
@@ -289,8 +289,8 @@ class TestLiveURLFeatures:
 class TestLivePerformanceAndCaching:
     """Test performance and caching with live data."""
 
-    def test_msgraphfilesystem_caching_performance(self):
-        """Test that MSGraphFileSystem caching improves performance."""
+    def test_msgdrivefs_caching_performance(self):
+        """Test that MSGDriveFS caching improves performance in multi-site mode."""
         import os
 
         # Skip if no credentials available
@@ -301,7 +301,7 @@ class TestLivePerformanceAndCaching:
         if not all([client_id, tenant_id, client_secret]):
             pytest.skip("Live credentials not available")
 
-        fs = MSGraphFileSystem(
+        fs = MSGDriveFS(
             client_id=client_id, tenant_id=tenant_id, client_secret=client_secret
         )
 
@@ -325,7 +325,7 @@ class TestLivePerformanceAndCaching:
         )
 
     def test_multiple_site_access(self):
-        """Test accessing multiple sites through MSGraphFileSystem."""
+        """Test accessing multiple sites through MSGDriveFS in multi-site mode."""
         import os
 
         # Skip if no credentials available
@@ -336,7 +336,7 @@ class TestLivePerformanceAndCaching:
         if not all([client_id, tenant_id, client_secret]):
             pytest.skip("Live credentials not available")
 
-        fs = MSGraphFileSystem(
+        fs = MSGDriveFS(
             client_id=client_id, tenant_id=tenant_id, client_secret=client_secret
         )
 
