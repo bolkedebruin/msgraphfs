@@ -6,14 +6,16 @@ Run with: pytest -m live
 Skip with: pytest -m "not live"
 """
 
+# Test site and drive names (credentials should be provided via environment variables)
+import os
+
 import fsspec
 import pytest
 
 from msgraphfs import MSGDriveFS
 
-# Test site and drive names (credentials should be provided via environment variables)
-TEST_SITE_NAME = "TestSite"
-TEST_DRIVE_NAME = "Documents"
+TEST_SITE_NAME = os.getenv("MSGRAPHFS_TEST_SITE_NAME", "TestSite")
+TEST_DRIVE_NAME = os.getenv("MSGRAPHFS_TEST_DRIVE_NAME", "Documents")
 
 
 class TestLiveURLFeatures:
