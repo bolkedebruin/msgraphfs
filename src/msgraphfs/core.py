@@ -1505,11 +1505,21 @@ class MSGDriveFS(AbstractMSGraphFS):
         Logic:
         - If both site_name and drive_name are set: path is the file path
         - If only site_name is set: path = drive_name/file_path
+        - If only drive_id is set (legacy mode): use existing drive_id, skip path parsing
+        - If drive_id is set (even with site_name): use drive_id directly, don't parse path
         - If neither is set: path = site_name/drive_name/file_path
         """
         # If we have both site and drive, no parsing needed
         if self.site_name and self.drive_name:
             return self.site_name, self.drive_name, path
+
+        # If we have a drive_id in single-site mode, use it directly regardless of site_name presence
+        # This handles both pure legacy mode (only drive_id) and test mode (site_name + drive_id)
+        if not self._multi_site_mode and self.drive_id:
+            # Use dummy values for site_name and drive_name since the rest of the system expects them
+            # The actual API calls will use drive_id directly via drive_url
+            site_placeholder = self.site_name or "legacy"
+            return site_placeholder, "legacy", path
 
         # Parse the path to extract missing components
         if "://" in path:
@@ -1558,6 +1568,12 @@ class MSGDriveFS(AbstractMSGraphFS):
         """Get or create a MSGDriveFS instance for the specified site and drive."""
         # If this instance already has the right site/drive, return self
         if self.site_name == site_name and self.drive_name == drive_name:
+            return self
+
+        # Legacy mode: if drive_name is "legacy" (from drive_id-only mode),
+        # return self since we're using the existing drive_id configuration
+        # This handles both pure legacy (site_name="legacy") and test mode (site_name=actual_site)
+        if drive_name == "legacy":
             return self
 
         # If we have a drive cache, use it (always available in multi-site mode)
